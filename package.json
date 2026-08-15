@@ -11,6 +11,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
+    "start:fake-payment": "node scripts/payment/fake-payment-server.mjs",
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "migration:run": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:run",
