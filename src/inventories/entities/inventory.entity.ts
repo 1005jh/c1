@@ -3,7 +3,7 @@ import {
   CreateDateColumn,
   Entity,
   JoinColumn,
-  ManyToOne,
+  OneToOne,
   PrimaryGeneratedColumn,
   Unique,
   UpdateDateColumn,
@@ -22,7 +22,7 @@ export class Inventory {
   @Column({ type: 'int', unsigned: true })
   quantity!: number;
 
-  @ManyToOne(() => Product, { nullable: false, onDelete: 'RESTRICT' })
+  @OneToOne(() => Product, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'productId' })
   product!: Product;
 
