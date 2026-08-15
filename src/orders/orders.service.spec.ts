@@ -118,6 +118,10 @@ describe('OrdersService', () => {
       ).resolves.toEqual({ ...order, items: orderItems });
 
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(inventoryRepository.findOne).toHaveBeenCalledWith({
+        where: { productId: 1 },
+        lock: { mode: 'pessimistic_write' },
+      });
       expect(inventory.quantity).toBe(97);
       expect(inventoryRepository.save).toHaveBeenCalledWith(inventory);
       expect(orderRepository.create).toHaveBeenCalledWith({

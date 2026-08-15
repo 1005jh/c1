@@ -45,6 +45,7 @@ export class OrdersService {
 
         const inventory = await inventoryRepository.findOne({
           where: { productId: item.productId },
+          lock: { mode: 'pessimistic_write' },
         });
 
         if (!inventory) {

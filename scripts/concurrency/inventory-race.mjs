@@ -23,8 +23,16 @@ const concurrency = parsePositiveInteger(
   DEFAULT_CONCURRENCY,
   'CONCURRENCY',
 );
-const rounds = parsePositiveInteger(process.env.ROUNDS, DEFAULT_ROUNDS, 'ROUNDS');
-const initialStock = concurrency;
+const rounds = parsePositiveInteger(
+  process.env.ROUNDS,
+  DEFAULT_ROUNDS,
+  'ROUNDS',
+);
+const initialStock = parsePositiveInteger(
+  process.env.INITIAL_STOCK,
+  concurrency,
+  'INITIAL_STOCK',
+);
 
 const requestJson = async (path, options = {}) => {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -134,9 +142,9 @@ const bucketFor = (result) => {
 const summarizeStatuses = (results) => {
   const buckets = {
     '2xx': 0,
-    '400': 0,
-    '404': 0,
-    '409': 0,
+    400: 0,
+    404: 0,
+    409: 0,
     '5xx': 0,
     'network/error': 0,
     other: 0,
@@ -287,9 +295,9 @@ const printSummary = (results) => {
       lostUpdates: 0,
       statusCounts: {
         '2xx': 0,
-        '400': 0,
-        '404': 0,
-        '409': 0,
+        400: 0,
+        404: 0,
+        409: 0,
         '5xx': 0,
         'network/error': 0,
         other: 0,
@@ -312,7 +320,17 @@ const printSummary = (results) => {
     `Race condition reproduced: ${results.some((result) => result.lostUpdates > 0)}`,
   );
   console.log('\nJSON Summary');
-  console.log(JSON.stringify({ config: { baseUrl, concurrency, rounds }, results, total }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        config: { baseUrl, concurrency, rounds, initialStock },
+        results,
+        total,
+      },
+      null,
+      2,
+    ),
+  );
 };
 
 const main = async () => {
