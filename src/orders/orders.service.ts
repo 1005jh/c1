@@ -43,25 +43,38 @@ export class OrdersService {
           );
         }
 
-        const inventory = await inventoryRepository.findOne({
-          where: { productId: item.productId },
-          lock: { mode: 'pessimistic_write' },
-        });
+        const updateResult = await manager
+          .createQueryBuilder()
+          .update(Inventory)
+          .set({
+            quantity: () => 'quantity - :quantity',
+          })
+          .where('productId = :productId', {
+            productId: item.productId,
+          })
+          .andWhere('quantity >= :quantity', {
+            quantity: item.quantity,
+          })
+          .setParameters({
+            quantity: item.quantity,
+          })
+          .execute();
 
-        if (!inventory) {
-          throw new ConflictException(
-            `Inventory for product id ${item.productId} does not exist`,
-          );
-        }
+        if (updateResult.affected !== 1) {
+          const inventory = await inventoryRepository.findOne({
+            where: { productId: item.productId },
+          });
 
-        if (inventory.quantity < item.quantity) {
+          if (!inventory) {
+            throw new ConflictException(
+              `Inventory for product id ${item.productId} does not exist`,
+            );
+          }
+
           throw new ConflictException(
             `Insufficient inventory for product id ${item.productId}`,
           );
         }
-
-        inventory.quantity -= item.quantity;
-        await inventoryRepository.save(inventory);
 
         const unitPrice = product.price;
         const subtotal = unitPrice * item.quantity;

@@ -22,6 +22,25 @@ const createMockRepository = <T = unknown>(): MockRepository<T> => ({
   findOne: jest.fn(),
 });
 
+const createMockUpdateQueryBuilder = () => {
+  const queryBuilder = {
+    update: jest.fn(),
+    set: jest.fn(),
+    where: jest.fn(),
+    andWhere: jest.fn(),
+    setParameters: jest.fn(),
+    execute: jest.fn(),
+  };
+
+  queryBuilder.update.mockReturnValue(queryBuilder);
+  queryBuilder.set.mockReturnValue(queryBuilder);
+  queryBuilder.where.mockReturnValue(queryBuilder);
+  queryBuilder.andWhere.mockReturnValue(queryBuilder);
+  queryBuilder.setParameters.mockReturnValue(queryBuilder);
+
+  return queryBuilder;
+};
+
 describe('OrdersService', () => {
   let service: OrdersService;
   let dataSource: {
@@ -32,14 +51,17 @@ describe('OrdersService', () => {
   let inventoryRepository: MockRepository<Inventory>;
   let orderRepository: MockRepository<Order>;
   let orderItemRepository: MockRepository<OrderItem>;
+  let updateQueryBuilder: ReturnType<typeof createMockUpdateQueryBuilder>;
 
   beforeEach(async () => {
     productRepository = createMockRepository<Product>();
     inventoryRepository = createMockRepository<Inventory>();
     orderRepository = createMockRepository<Order>();
     orderItemRepository = createMockRepository<OrderItem>();
+    updateQueryBuilder = createMockUpdateQueryBuilder();
 
     const manager = {
+      createQueryBuilder: jest.fn(() => updateQueryBuilder),
       getRepository: jest.fn((entity) => {
         if (entity === Product) {
           return productRepository;
@@ -88,7 +110,6 @@ describe('OrdersService', () => {
   describe('create', () => {
     it('decreases inventory, creates order and order items, and calculates total amount', async () => {
       const product = { id: 1, price: 10000 } as Product;
-      const inventory = { id: 1, productId: 1, quantity: 100 } as Inventory;
       const order = {
         id: 1,
         status: OrderStatus.PENDING_PAYMENT,
@@ -106,8 +127,7 @@ describe('OrdersService', () => {
       ] as OrderItem[];
 
       productRepository.findOne?.mockResolvedValue(product);
-      inventoryRepository.findOne?.mockResolvedValue(inventory);
-      inventoryRepository.save?.mockResolvedValue(inventory);
+      updateQueryBuilder.execute.mockResolvedValue({ affected: 1 });
       orderRepository.create?.mockImplementation((value) => value);
       orderRepository.save?.mockResolvedValue(order);
       orderItemRepository.create?.mockImplementation((value) => value);
@@ -118,12 +138,23 @@ describe('OrdersService', () => {
       ).resolves.toEqual({ ...order, items: orderItems });
 
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      expect(inventoryRepository.findOne).toHaveBeenCalledWith({
-        where: { productId: 1 },
-        lock: { mode: 'pessimistic_write' },
+      expect(updateQueryBuilder.update).toHaveBeenCalledWith(Inventory);
+      expect(updateQueryBuilder.set).toHaveBeenCalledWith({
+        quantity: expect.any(Function),
       });
-      expect(inventory.quantity).toBe(97);
-      expect(inventoryRepository.save).toHaveBeenCalledWith(inventory);
+      expect(updateQueryBuilder.where).toHaveBeenCalledWith(
+        'productId = :productId',
+        { productId: 1 },
+      );
+      expect(updateQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'quantity >= :quantity',
+        { quantity: 3 },
+      );
+      expect(updateQueryBuilder.setParameters).toHaveBeenCalledWith({
+        quantity: 3,
+      });
+      expect(inventoryRepository.findOne).not.toHaveBeenCalled();
+      expect(inventoryRepository.save).not.toHaveBeenCalled();
       expect(orderRepository.create).toHaveBeenCalledWith({
         status: OrderStatus.PENDING_PAYMENT,
         totalAmount: 30000,
@@ -143,23 +174,28 @@ describe('OrdersService', () => {
       await expect(
         service.create({ items: [{ productId: 999, quantity: 1 }] }),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(inventoryRepository.findOne).not.toHaveBeenCalled();
+      expect(updateQueryBuilder.execute).not.toHaveBeenCalled();
       expect(orderRepository.save).not.toHaveBeenCalled();
     });
 
     it('throws ConflictException when inventory does not exist', async () => {
       productRepository.findOne?.mockResolvedValue({ id: 1, price: 10000 });
+      updateQueryBuilder.execute.mockResolvedValue({ affected: 0 });
       inventoryRepository.findOne?.mockResolvedValue(null);
 
       await expect(
         service.create({ items: [{ productId: 1, quantity: 1 }] }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(inventoryRepository.save).not.toHaveBeenCalled();
+      expect(inventoryRepository.findOne).toHaveBeenCalledWith({
+        where: { productId: 1 },
+      });
       expect(orderRepository.save).not.toHaveBeenCalled();
     });
 
     it('throws ConflictException when inventory is insufficient', async () => {
       productRepository.findOne?.mockResolvedValue({ id: 1, price: 10000 });
+      updateQueryBuilder.execute.mockResolvedValue({ affected: 0 });
       inventoryRepository.findOne?.mockResolvedValue({
         id: 1,
         productId: 1,
@@ -170,6 +206,9 @@ describe('OrdersService', () => {
         service.create({ items: [{ productId: 1, quantity: 2 }] }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(inventoryRepository.save).not.toHaveBeenCalled();
+      expect(inventoryRepository.findOne).toHaveBeenCalledWith({
+        where: { productId: 1 },
+      });
       expect(orderRepository.save).not.toHaveBeenCalled();
     });
 
