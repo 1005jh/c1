@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { validate } from './config/env.validation';
 import { createTypeOrmOptions } from './config/typeorm.config';
 import { InventoriesModule } from './inventories/inventories.module';
+import { OrdersModule } from './orders/orders.module';
 import { ProductsModule } from './products/products.module';
 
 @Module({
@@ -20,6 +21,7 @@ import { ProductsModule } from './products/products.module';
     }),
     ProductsModule,
     InventoriesModule,
+    OrdersModule,
   ],
   controllers: [AppController],
   providers: [AppService],
