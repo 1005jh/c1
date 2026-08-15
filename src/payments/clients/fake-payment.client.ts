@@ -5,6 +5,7 @@ import { PaymentStatus } from '../entities/payment-status.enum';
 type ChargeRequest = {
   orderId: number;
   amount: number;
+  idempotencyKey: string;
 };
 
 type ChargeResponse = {
@@ -30,8 +31,12 @@ export class FakePaymentClient {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          'idempotency-key': request.idempotencyKey,
         },
-        body: JSON.stringify(request),
+        body: JSON.stringify({
+          orderId: request.orderId,
+          amount: request.amount,
+        }),
       });
     } catch {
       throw new BadGatewayException('Payment provider request failed');

@@ -110,6 +110,7 @@ describe('PaymentsService', () => {
         transactionId: 'tx_1',
         status: PaymentStatus.SUCCESS,
       });
+      transactionalPaymentRepository.findOne?.mockResolvedValue(null);
       transactionalPaymentRepository.create?.mockImplementation(
         (value) => value,
       );
@@ -124,6 +125,7 @@ describe('PaymentsService', () => {
       expect(fakePaymentClient.charge).toHaveBeenCalledWith({
         orderId: 1,
         amount: 30000,
+        idempotencyKey: 'payment:order:1',
       });
       expect(fakePaymentClient.charge.mock.invocationCallOrder[0]).toBeLessThan(
         dataSource.transaction.mock.invocationCallOrder[0],
@@ -155,6 +157,7 @@ describe('PaymentsService', () => {
         status: OrderStatus.PAID,
         totalAmount: 30000,
       });
+      paymentRepository.findOne?.mockResolvedValue(null);
 
       await expect(service.payOrder(1)).rejects.toBeInstanceOf(
         ConflictException,
@@ -163,19 +166,161 @@ describe('PaymentsService', () => {
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
-    it('throws ConflictException when payment already exists', async () => {
+    it('returns existing successful payment without charging provider', async () => {
+      const existingPayment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      } as Payment;
+
       orderRepository.findOne?.mockResolvedValue({
         id: 1,
         status: OrderStatus.PENDING_PAYMENT,
         totalAmount: 30000,
       });
-      paymentRepository.findOne?.mockResolvedValue({ id: 1, orderId: 1 });
+      paymentRepository.findOne?.mockResolvedValue(existingPayment);
 
-      await expect(service.payOrder(1)).rejects.toBeInstanceOf(
-        ConflictException,
-      );
+      await expect(service.payOrder(1)).resolves.toBe(existingPayment);
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('returns existing payment when order is already paid', async () => {
+      const existingPayment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      } as Payment;
+
+      orderRepository.findOne?.mockResolvedValue({
+        id: 1,
+        status: OrderStatus.PAID,
+        totalAmount: 30000,
+      });
+      paymentRepository.findOne?.mockResolvedValue(existingPayment);
+
+      await expect(service.payOrder(1)).resolves.toBe(existingPayment);
+      expect(fakePaymentClient.charge).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('recovers existing payment after duplicate insert race', async () => {
+      const order = {
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      } as Order;
+      const existingPayment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      } as Payment;
+      const duplicateError = {
+        query:
+          'INSERT INTO `payments`(`id`, `orderId`, `amount`, `status`, `providerTransactionId`, `createdAt`, `updatedAt`) VALUES (DEFAULT, ?, ?, ?, ?, DEFAULT, DEFAULT)',
+        driverError: {
+          code: 'ER_DUP_ENTRY',
+        },
+      };
+
+      orderRepository.findOne?.mockResolvedValue(order);
+      paymentRepository.findOne
+        ?.mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(existingPayment);
+      fakePaymentClient.charge.mockResolvedValue({
+        transactionId: 'tx_1',
+        status: PaymentStatus.SUCCESS,
+      });
+      transactionalPaymentRepository.findOne?.mockResolvedValue(null);
+      transactionalPaymentRepository.create?.mockImplementation(
+        (value) => value,
+      );
+      transactionalPaymentRepository.save?.mockRejectedValue(duplicateError);
+
+      await expect(service.payOrder(1)).resolves.toBe(existingPayment);
+      expect(fakePaymentClient.charge).toHaveBeenCalledWith({
+        orderId: 1,
+        amount: 30000,
+        idempotencyKey: 'payment:order:1',
+      });
+      expect(paymentRepository.findOne).toHaveBeenLastCalledWith({
+        where: { orderId: 1, status: PaymentStatus.SUCCESS },
+      });
+      expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('recovers existing payment after payment insert deadlock race', async () => {
+      const order = {
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      } as Order;
+      const existingPayment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      } as Payment;
+      const deadlockError = {
+        query:
+          'INSERT INTO `payments`(`id`, `orderId`, `amount`, `status`, `providerTransactionId`, `createdAt`, `updatedAt`) VALUES (DEFAULT, ?, ?, ?, ?, DEFAULT, DEFAULT)',
+        driverError: {
+          code: 'ER_LOCK_DEADLOCK',
+        },
+      };
+
+      orderRepository.findOne?.mockResolvedValue(order);
+      paymentRepository.findOne
+        ?.mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(existingPayment);
+      fakePaymentClient.charge.mockResolvedValue({
+        transactionId: 'tx_1',
+        status: PaymentStatus.SUCCESS,
+      });
+      transactionalPaymentRepository.findOne?.mockResolvedValue(null);
+      transactionalPaymentRepository.create?.mockImplementation(
+        (value) => value,
+      );
+      transactionalPaymentRepository.save?.mockRejectedValue(deadlockError);
+
+      await expect(service.payOrder(1)).resolves.toBe(existingPayment);
+      expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('does not hide general database errors', async () => {
+      const order = {
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      } as Order;
+      const databaseError = new Error('database failed');
+
+      orderRepository.findOne?.mockResolvedValue(order);
+      paymentRepository.findOne?.mockResolvedValue(null);
+      fakePaymentClient.charge.mockResolvedValue({
+        transactionId: 'tx_1',
+        status: PaymentStatus.SUCCESS,
+      });
+      transactionalPaymentRepository.findOne?.mockResolvedValue(null);
+      transactionalPaymentRepository.create?.mockImplementation(
+        (value) => value,
+      );
+      transactionalPaymentRepository.save?.mockRejectedValue(databaseError);
+
+      await expect(service.payOrder(1)).rejects.toBe(databaseError);
+      expect(fakePaymentClient.charge).toHaveBeenCalledWith({
+        orderId: 1,
+        amount: 30000,
+        idempotencyKey: 'payment:order:1',
+      });
+      expect(paymentRepository.findOne).toHaveBeenCalledTimes(1);
     });
 
     it('does not create payment or mark order paid when provider fails', async () => {
@@ -211,6 +356,7 @@ describe('PaymentsService', () => {
         transactionId: 'tx_1',
         status: PaymentStatus.SUCCESS,
       });
+      transactionalPaymentRepository.findOne?.mockResolvedValue(null);
       transactionalPaymentRepository.create?.mockImplementation(
         (value) => value,
       );

@@ -39,6 +39,7 @@ const sendJson = (response, statusCode, body) => {
 };
 
 const charges = [];
+const idempotencyResults = new Map();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host}`);
@@ -58,6 +59,7 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === 'POST' && url.pathname === '/reset') {
     charges.length = 0;
+    idempotencyResults.clear();
 
     sendJson(response, 200, {
       reset: true,
@@ -74,6 +76,27 @@ const server = http.createServer(async (request, response) => {
 
   try {
     const body = await readJsonBody(request);
+    const idempotencyKey = request.headers['idempotency-key'];
+
+    if (typeof idempotencyKey === 'string') {
+      const existingResult = idempotencyResults.get(idempotencyKey);
+
+      if (existingResult) {
+        if (
+          existingResult.orderId !== body?.orderId ||
+          existingResult.amount !== body?.amount
+        ) {
+          sendJson(response, 409, {
+            message: 'Idempotency key payload mismatch',
+          });
+          return;
+        }
+
+        sendJson(response, 200, existingResult);
+        return;
+      }
+    }
+
     const transactionId = `fake_${Date.now()}_${randomUUID()}`;
     const charge = {
       transactionId,
@@ -81,15 +104,20 @@ const server = http.createServer(async (request, response) => {
       amount: body?.amount,
       chargedAt: new Date().toISOString(),
     };
-
-    charges.push(charge);
-
-    sendJson(response, 200, {
+    const result = {
       transactionId,
       status: 'SUCCESS',
       orderId: charge.orderId,
       amount: charge.amount,
-    });
+    };
+
+    charges.push(charge);
+
+    if (typeof idempotencyKey === 'string') {
+      idempotencyResults.set(idempotencyKey, result);
+    }
+
+    sendJson(response, 200, result);
   } catch {
     sendJson(response, 400, {
       message: 'Invalid JSON',
