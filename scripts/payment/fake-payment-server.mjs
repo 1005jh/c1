@@ -40,6 +40,40 @@ const sendJson = (response, statusCode, body) => {
 
 const charges = [];
 const idempotencyResults = new Map();
+const faultState = {
+  mode: null,
+  remaining: 0,
+};
+
+const configureFaultMode = (body) => {
+  if (body?.mode !== 'DROP_RESPONSE_AFTER_SUCCESS') {
+    throw new Error('Unsupported fault mode');
+  }
+
+  if (!Number.isInteger(body.count) || body.count < 1) {
+    throw new Error('Fault count must be a positive integer');
+  }
+
+  faultState.mode = body.mode;
+  faultState.remaining = body.count;
+};
+
+const shouldDropResponseAfterSuccess = () => {
+  if (
+    faultState.mode !== 'DROP_RESPONSE_AFTER_SUCCESS' ||
+    faultState.remaining < 1
+  ) {
+    return false;
+  }
+
+  faultState.remaining -= 1;
+
+  if (faultState.remaining === 0) {
+    faultState.mode = null;
+  }
+
+  return true;
+};
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host}`);
@@ -60,10 +94,29 @@ const server = http.createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/reset') {
     charges.length = 0;
     idempotencyResults.clear();
+    faultState.mode = null;
+    faultState.remaining = 0;
 
     sendJson(response, 200, {
       reset: true,
     });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/fault-mode') {
+    try {
+      const body = await readJsonBody(request);
+      configureFaultMode(body);
+
+      sendJson(response, 200, {
+        mode: faultState.mode,
+        remaining: faultState.remaining,
+      });
+    } catch (error) {
+      sendJson(response, 400, {
+        message: error instanceof Error ? error.message : 'Invalid fault mode',
+      });
+    }
     return;
   }
 
@@ -115,6 +168,11 @@ const server = http.createServer(async (request, response) => {
 
     if (typeof idempotencyKey === 'string') {
       idempotencyResults.set(idempotencyKey, result);
+    }
+
+    if (shouldDropResponseAfterSuccess()) {
+      response.destroy();
+      return;
     }
 
     sendJson(response, 200, result);
