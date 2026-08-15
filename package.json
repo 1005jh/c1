@@ -17,6 +17,7 @@
     "migration:run": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:run",
     "migration:revert": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:revert",
     "test:concurrency:inventory": "node scripts/concurrency/inventory-race.mjs",
+    "test:concurrency:payment": "node scripts/concurrency/payment-duplicate-race.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",

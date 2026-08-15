@@ -38,8 +38,34 @@ const sendJson = (response, statusCode, body) => {
   response.end(JSON.stringify(body));
 };
 
+const charges = [];
+
 const server = http.createServer(async (request, response) => {
-  if (request.method !== 'POST' || request.url !== '/charges') {
+  const url = new URL(request.url ?? '/', `http://${request.headers.host}`);
+
+  if (request.method === 'GET' && url.pathname === '/charges') {
+    const orderId = url.searchParams.get('orderId');
+    const filteredCharges =
+      orderId === null
+        ? charges
+        : charges.filter((charge) => String(charge.orderId) === orderId);
+
+    sendJson(response, 200, {
+      charges: filteredCharges,
+    });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/reset') {
+    charges.length = 0;
+
+    sendJson(response, 200, {
+      reset: true,
+    });
+    return;
+  }
+
+  if (request.method !== 'POST' || url.pathname !== '/charges') {
     sendJson(response, 404, {
       message: 'Not Found',
     });
@@ -48,12 +74,21 @@ const server = http.createServer(async (request, response) => {
 
   try {
     const body = await readJsonBody(request);
-
-    sendJson(response, 200, {
-      transactionId: `fake_${Date.now()}_${randomUUID()}`,
-      status: 'SUCCESS',
+    const transactionId = `fake_${Date.now()}_${randomUUID()}`;
+    const charge = {
+      transactionId,
       orderId: body?.orderId,
       amount: body?.amount,
+      chargedAt: new Date().toISOString(),
+    };
+
+    charges.push(charge);
+
+    sendJson(response, 200, {
+      transactionId,
+      status: 'SUCCESS',
+      orderId: charge.orderId,
+      amount: charge.amount,
     });
   } catch {
     sendJson(response, 400, {
