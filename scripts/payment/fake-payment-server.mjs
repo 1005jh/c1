@@ -77,6 +77,27 @@ const shouldDropResponseAfterSuccess = () => {
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host}`);
+  const idempotencyLookupPrefix = '/charges/idempotency/';
+
+  if (
+    request.method === 'GET' &&
+    url.pathname.startsWith(idempotencyLookupPrefix)
+  ) {
+    const idempotencyKey = decodeURIComponent(
+      url.pathname.slice(idempotencyLookupPrefix.length),
+    );
+    const existingResult = idempotencyResults.get(idempotencyKey);
+
+    if (!existingResult) {
+      sendJson(response, 404, {
+        message: 'Charge not found',
+      });
+      return;
+    }
+
+    sendJson(response, 200, existingResult);
+    return;
+  }
 
   if (request.method === 'GET' && url.pathname === '/charges') {
     const orderId = url.searchParams.get('orderId');

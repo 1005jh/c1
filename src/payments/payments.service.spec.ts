@@ -10,6 +10,7 @@ import { Order } from '../orders/entities/order.entity';
 import { FakePaymentClient } from './clients/fake-payment.client';
 import { PaymentStatus } from './entities/payment-status.enum';
 import { Payment } from './entities/payment.entity';
+import { PaymentProviderUnknownOutcomeException } from './exceptions/payment-provider-unknown-outcome.exception';
 import { PaymentsService } from './payments.service';
 
 type MockRepository<T = unknown> = Partial<
@@ -32,7 +33,9 @@ describe('PaymentsService', () => {
   let paymentRepository: MockRepository<Payment>;
   let transactionalOrderRepository: MockRepository<Order>;
   let transactionalPaymentRepository: MockRepository<Payment>;
-  let fakePaymentClient: jest.Mocked<Pick<FakePaymentClient, 'charge'>>;
+  let fakePaymentClient: jest.Mocked<
+    Pick<FakePaymentClient, 'charge' | 'getChargeByIdempotencyKey'>
+  >;
 
   beforeEach(async () => {
     orderRepository = createMockRepository<Order>();
@@ -41,6 +44,7 @@ describe('PaymentsService', () => {
     transactionalPaymentRepository = createMockRepository<Payment>();
     fakePaymentClient = {
       charge: jest.fn(),
+      getChargeByIdempotencyKey: jest.fn(),
     };
 
     const manager = {
@@ -208,6 +212,68 @@ describe('PaymentsService', () => {
       expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
+    it('stores unknown payment and keeps order pending when provider outcome is unknown', async () => {
+      const order = {
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      } as Order;
+      const unknownPayment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.UNKNOWN,
+        providerTransactionId: null,
+      } as Payment;
+
+      orderRepository.findOne?.mockResolvedValue(order);
+      paymentRepository.findOne?.mockResolvedValue(null);
+      fakePaymentClient.charge.mockRejectedValue(
+        new PaymentProviderUnknownOutcomeException(),
+      );
+      transactionalPaymentRepository.findOne?.mockResolvedValue(null);
+      transactionalPaymentRepository.create?.mockImplementation(
+        (value) => value,
+      );
+      transactionalPaymentRepository.save?.mockResolvedValue(unknownPayment);
+
+      await expect(service.payOrder(1)).rejects.toBeInstanceOf(
+        PaymentProviderUnknownOutcomeException,
+      );
+      expect(transactionalPaymentRepository.create).toHaveBeenCalledWith({
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.UNKNOWN,
+        providerTransactionId: null,
+      });
+      expect(transactionalPaymentRepository.save).toHaveBeenCalled();
+      expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
+      expect(order.status).toBe(OrderStatus.PENDING_PAYMENT);
+    });
+
+    it('does not charge provider again when payment outcome is already unknown', async () => {
+      const unknownPayment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.UNKNOWN,
+        providerTransactionId: null,
+      } as Payment;
+
+      orderRepository.findOne?.mockResolvedValue({
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      });
+      paymentRepository.findOne?.mockResolvedValue(unknownPayment);
+
+      await expect(service.payOrder(1)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(fakePaymentClient.charge).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
     it('recovers existing payment after duplicate insert race', async () => {
       const order = {
         id: 1,
@@ -250,7 +316,7 @@ describe('PaymentsService', () => {
         idempotencyKey: 'payment:order:1',
       });
       expect(paymentRepository.findOne).toHaveBeenLastCalledWith({
-        where: { orderId: 1, status: PaymentStatus.SUCCESS },
+        where: { orderId: 1 },
       });
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
     });
@@ -370,6 +436,134 @@ describe('PaymentsService', () => {
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
       expect(transactionalPaymentRepository.save).toHaveBeenCalledTimes(1);
       expect(transactionalOrderRepository.save).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('reconcileOrder', () => {
+    it('updates unknown payment to success and marks order as paid', async () => {
+      const order = {
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      } as Order;
+      const payment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.UNKNOWN,
+        providerTransactionId: null,
+      } as Payment;
+
+      orderRepository.findOne?.mockResolvedValue(order);
+      paymentRepository.findOne?.mockResolvedValue(payment);
+      fakePaymentClient.getChargeByIdempotencyKey.mockResolvedValue({
+        found: true,
+        transactionId: 'tx_1',
+        status: PaymentStatus.SUCCESS,
+        orderId: 1,
+        amount: 30000,
+      });
+      transactionalPaymentRepository.findOne?.mockResolvedValue(payment);
+      transactionalPaymentRepository.save?.mockResolvedValue({
+        ...payment,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      });
+      transactionalOrderRepository.save?.mockResolvedValue({
+        ...order,
+        status: OrderStatus.PAID,
+      });
+
+      await expect(service.reconcileOrder(1)).resolves.toMatchObject({
+        id: 1,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      });
+      expect(fakePaymentClient.getChargeByIdempotencyKey).toHaveBeenCalledWith(
+        'payment:order:1',
+      );
+      expect(
+        fakePaymentClient.getChargeByIdempotencyKey.mock.invocationCallOrder[0],
+      ).toBeLessThan(dataSource.transaction.mock.invocationCallOrder[0]);
+      expect(payment.status).toBe(PaymentStatus.SUCCESS);
+      expect(payment.providerTransactionId).toBe('tx_1');
+      expect(order.status).toBe(OrderStatus.PAID);
+      expect(transactionalPaymentRepository.save).toHaveBeenCalledWith(payment);
+      expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
+    });
+
+    it('keeps unknown payment when provider result is not found', async () => {
+      const payment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.UNKNOWN,
+        providerTransactionId: null,
+      } as Payment;
+
+      orderRepository.findOne?.mockResolvedValue({
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      });
+      paymentRepository.findOne?.mockResolvedValue(payment);
+      fakePaymentClient.getChargeByIdempotencyKey.mockResolvedValue({
+        found: false,
+      });
+
+      await expect(service.reconcileOrder(1)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(payment.status).toBe(PaymentStatus.UNKNOWN);
+      expect(payment.providerTransactionId).toBeNull();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('returns existing successful payment without provider lookup', async () => {
+      const payment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      } as Payment;
+
+      orderRepository.findOne?.mockResolvedValue({
+        id: 1,
+        status: OrderStatus.PAID,
+        totalAmount: 30000,
+      });
+      paymentRepository.findOne?.mockResolvedValue(payment);
+
+      await expect(service.reconcileOrder(1)).resolves.toBe(payment);
+      expect(
+        fakePaymentClient.getChargeByIdempotencyKey,
+      ).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('is idempotent when repeated after successful reconciliation', async () => {
+      const payment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      } as Payment;
+
+      orderRepository.findOne?.mockResolvedValue({
+        id: 1,
+        status: OrderStatus.PAID,
+        totalAmount: 30000,
+      });
+      paymentRepository.findOne?.mockResolvedValue(payment);
+
+      await service.reconcileOrder(1);
+      await expect(service.reconcileOrder(1)).resolves.toBe(payment);
+      expect(
+        fakePaymentClient.getChargeByIdempotencyKey,
+      ).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
     });
   });
 });

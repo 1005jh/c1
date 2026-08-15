@@ -9,4 +9,9 @@ export class PaymentsController {
   payOrder(@Param('orderId', ParseIntPipe) orderId: number) {
     return this.paymentsService.payOrder(orderId);
   }
+
+  @Post('reconcile')
+  reconcileOrder(@Param('orderId', ParseIntPipe) orderId: number) {
+    return this.paymentsService.reconcileOrder(orderId);
+  }
 }

@@ -26,8 +26,8 @@ export class Payment {
   @Column({ type: 'varchar', length: 30 })
   status!: PaymentStatus;
 
-  @Column({ type: 'varchar', length: 100 })
-  providerTransactionId!: string;
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  providerTransactionId!: string | null;
 
   @OneToOne(() => Order, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'orderId' })
