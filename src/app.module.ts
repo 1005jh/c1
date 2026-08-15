@@ -5,6 +5,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { validate } from './config/env.validation';
 import { createTypeOrmOptions } from './config/typeorm.config';
+import { InventoriesModule } from './inventories/inventories.module';
 import { ProductsModule } from './products/products.module';
 
 @Module({
@@ -18,6 +19,7 @@ import { ProductsModule } from './products/products.module';
       useFactory: createTypeOrmOptions,
     }),
     ProductsModule,
+    InventoriesModule,
   ],
   controllers: [AppController],
   providers: [AppService],

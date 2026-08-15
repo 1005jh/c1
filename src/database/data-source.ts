@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { Inventory } from '../inventories/entities/inventory.entity';
 import { Product } from '../products/entities/product.entity';
 
 try {
@@ -26,7 +27,7 @@ export default new DataSource({
   username: requiredEnv('DB_USERNAME'),
   password: requiredEnv('DB_PASSWORD'),
   database: requiredEnv('DB_DATABASE'),
-  entities: [Product],
+  entities: [Product, Inventory],
   migrations: [__dirname + '/../migrations/*{.ts,.js}'],
   synchronize: false,
 });
