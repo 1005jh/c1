@@ -10,7 +10,7 @@ export const createTypeOrmOptions = (
   username: configService.getOrThrow<string>('DB_USERNAME'),
   password: configService.getOrThrow<string>('DB_PASSWORD'),
   database: configService.getOrThrow<string>('DB_DATABASE'),
-  entities: [],
+  autoLoadEntities: true,
   migrations: [__dirname + '/../migrations/*{.ts,.js}'],
   synchronize: false,
 });
