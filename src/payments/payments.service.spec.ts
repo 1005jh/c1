@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataSource, Repository } from 'typeorm';
+import { PaymentCompletedPublisher } from '../messaging/events/payment-completed.publisher';
 import { OrderStatus } from '../orders/entities/order-status.enum';
 import { Order } from '../orders/entities/order.entity';
 import { FakePaymentClient } from './clients/fake-payment.client';
@@ -36,6 +37,9 @@ describe('PaymentsService', () => {
   let fakePaymentClient: jest.Mocked<
     Pick<FakePaymentClient, 'charge' | 'getChargeByIdempotencyKey'>
   >;
+  let paymentCompletedPublisher: jest.Mocked<
+    Pick<PaymentCompletedPublisher, 'publish'>
+  >;
 
   beforeEach(async () => {
     orderRepository = createMockRepository<Order>();
@@ -45,6 +49,9 @@ describe('PaymentsService', () => {
     fakePaymentClient = {
       charge: jest.fn(),
       getChargeByIdempotencyKey: jest.fn(),
+    };
+    paymentCompletedPublisher = {
+      publish: jest.fn().mockResolvedValue(undefined),
     };
 
     const manager = {
@@ -86,6 +93,10 @@ describe('PaymentsService', () => {
         {
           provide: FakePaymentClient,
           useValue: fakePaymentClient,
+        },
+        {
+          provide: PaymentCompletedPublisher,
+          useValue: paymentCompletedPublisher,
         },
       ],
     }).compile();
@@ -143,6 +154,11 @@ describe('PaymentsService', () => {
       expect(transactionalPaymentRepository.save).toHaveBeenCalled();
       expect(order.status).toBe(OrderStatus.PAID);
       expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
+      expect(paymentCompletedPublisher.publish).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedPublisher.publish).toHaveBeenCalledWith(payment);
+      expect(dataSource.transaction.mock.invocationCallOrder[0]).toBeLessThan(
+        paymentCompletedPublisher.publish.mock.invocationCallOrder[0],
+      );
     });
 
     it('throws NotFoundException when order does not exist', async () => {
@@ -153,6 +169,7 @@ describe('PaymentsService', () => {
       );
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('throws ConflictException when order is already paid', async () => {
@@ -168,6 +185,7 @@ describe('PaymentsService', () => {
       );
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('returns existing successful payment without charging provider', async () => {
@@ -189,6 +207,7 @@ describe('PaymentsService', () => {
       await expect(service.payOrder(1)).resolves.toBe(existingPayment);
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('returns existing payment when order is already paid', async () => {
@@ -210,6 +229,7 @@ describe('PaymentsService', () => {
       await expect(service.payOrder(1)).resolves.toBe(existingPayment);
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('stores unknown payment and keeps order pending when provider outcome is unknown', async () => {
@@ -249,6 +269,7 @@ describe('PaymentsService', () => {
       expect(transactionalPaymentRepository.save).toHaveBeenCalled();
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
       expect(order.status).toBe(OrderStatus.PENDING_PAYMENT);
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('does not charge provider again when payment outcome is already unknown', async () => {
@@ -272,6 +293,7 @@ describe('PaymentsService', () => {
       );
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('recovers existing payment after duplicate insert race', async () => {
@@ -319,6 +341,7 @@ describe('PaymentsService', () => {
         where: { orderId: 1 },
       });
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('recovers existing payment after payment insert deadlock race', async () => {
@@ -358,6 +381,7 @@ describe('PaymentsService', () => {
 
       await expect(service.payOrder(1)).resolves.toBe(existingPayment);
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('does not hide general database errors', async () => {
@@ -387,6 +411,7 @@ describe('PaymentsService', () => {
         idempotencyKey: 'payment:order:1',
       });
       expect(paymentRepository.findOne).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('does not create payment or mark order paid when provider fails', async () => {
@@ -407,6 +432,7 @@ describe('PaymentsService', () => {
       expect(transactionalPaymentRepository.save).not.toHaveBeenCalled();
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
       expect(order.status).toBe(OrderStatus.PENDING_PAYMENT);
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('uses the same transaction manager for payment and order changes', async () => {
@@ -436,6 +462,7 @@ describe('PaymentsService', () => {
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
       expect(transactionalPaymentRepository.save).toHaveBeenCalledTimes(1);
       expect(transactionalOrderRepository.save).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedPublisher.publish).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -490,6 +517,15 @@ describe('PaymentsService', () => {
       expect(order.status).toBe(OrderStatus.PAID);
       expect(transactionalPaymentRepository.save).toHaveBeenCalledWith(payment);
       expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
+      expect(paymentCompletedPublisher.publish).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedPublisher.publish).toHaveBeenCalledWith({
+        ...payment,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      });
+      expect(dataSource.transaction.mock.invocationCallOrder[0]).toBeLessThan(
+        paymentCompletedPublisher.publish.mock.invocationCallOrder[0],
+      );
     });
 
     it('keeps unknown payment when provider result is not found', async () => {
@@ -517,6 +553,7 @@ describe('PaymentsService', () => {
       expect(payment.status).toBe(PaymentStatus.UNKNOWN);
       expect(payment.providerTransactionId).toBeNull();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('returns existing successful payment without provider lookup', async () => {
@@ -540,6 +577,7 @@ describe('PaymentsService', () => {
         fakePaymentClient.getChargeByIdempotencyKey,
       ).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
 
     it('is idempotent when repeated after successful reconciliation', async () => {
@@ -564,6 +602,7 @@ describe('PaymentsService', () => {
         fakePaymentClient.getChargeByIdempotencyKey,
       ).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
     });
   });
 });

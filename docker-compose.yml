@@ -12,5 +12,18 @@ services:
     volumes:
       - commerce_mysql_data:/var/lib/mysql
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: commerce-rabbitmq
+    ports:
+      - '${RABBITMQ_PORT:-5672}:5672'
+      - '${RABBITMQ_MANAGEMENT_PORT:-15672}:15672'
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-commerce}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-commerce}
+    volumes:
+      - commerce_rabbitmq_data:/var/lib/rabbitmq
+
 volumes:
   commerce_mysql_data:
+  commerce_rabbitmq_data:

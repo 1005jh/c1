@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { PaymentCompletedPublisher } from '../messaging/events/payment-completed.publisher';
 import { OrderStatus } from '../orders/entities/order-status.enum';
 import { Order } from '../orders/entities/order.entity';
 import { FakePaymentClient } from './clients/fake-payment.client';
@@ -16,6 +17,7 @@ export class PaymentsService {
   constructor(
     private readonly dataSource: DataSource,
     private readonly fakePaymentClient: FakePaymentClient,
+    private readonly paymentCompletedPublisher: PaymentCompletedPublisher,
   ) {}
 
   async payOrder(orderId: number): Promise<Payment> {
@@ -65,7 +67,7 @@ export class PaymentsService {
     }
 
     try {
-      return await this.dataSource.transaction(async (manager) => {
+      const result = await this.dataSource.transaction(async (manager) => {
         const transactionalPaymentRepository = manager.getRepository(Payment);
         const transactionalOrderRepository = manager.getRepository(Order);
 
@@ -76,7 +78,10 @@ export class PaymentsService {
 
         if (existingTransactionalPayment) {
           if (existingTransactionalPayment.status === PaymentStatus.SUCCESS) {
-            return existingTransactionalPayment;
+            return {
+              payment: existingTransactionalPayment,
+              shouldPublishCompletedEvent: false,
+            };
           }
 
           throw new ConflictException(
@@ -96,8 +101,17 @@ export class PaymentsService {
         order.status = OrderStatus.PAID;
         await transactionalOrderRepository.save(order);
 
-        return payment;
+        return {
+          payment,
+          shouldPublishCompletedEvent: true,
+        };
       });
+
+      if (result.shouldPublishCompletedEvent) {
+        await this.paymentCompletedPublisher.publish(result.payment);
+      }
+
+      return result.payment;
     } catch (error) {
       if (!this.isRecoverablePaymentInsertRaceError(error)) {
         throw error;
@@ -156,7 +170,7 @@ export class PaymentsService {
       );
     }
 
-    return this.dataSource.transaction(async (manager) => {
+    const result = await this.dataSource.transaction(async (manager) => {
       const transactionalPaymentRepository = manager.getRepository(Payment);
       const transactionalOrderRepository = manager.getRepository(Order);
 
@@ -173,7 +187,10 @@ export class PaymentsService {
       }
 
       if (transactionalPayment.status === PaymentStatus.SUCCESS) {
-        return transactionalPayment;
+        return {
+          payment: transactionalPayment,
+          shouldPublishCompletedEvent: false,
+        };
       }
 
       transactionalPayment.status = PaymentStatus.SUCCESS;
@@ -186,8 +203,17 @@ export class PaymentsService {
       order.status = OrderStatus.PAID;
       await transactionalOrderRepository.save(order);
 
-      return savedPayment;
+      return {
+        payment: savedPayment,
+        shouldPublishCompletedEvent: true,
+      };
     });
+
+    if (result.shouldPublishCompletedEvent) {
+      await this.paymentCompletedPublisher.publish(result.payment);
+    }
+
+    return result.payment;
   }
 
   private async saveUnknownPayment(order: Order): Promise<Payment> {
