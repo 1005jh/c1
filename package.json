@@ -20,6 +20,7 @@
     "test:concurrency:payment": "node scripts/concurrency/payment-duplicate-race.mjs",
     "test:payment:response-loss": "node scripts/experiments/payment-response-loss.mjs",
     "test:payment:reconciliation": "node scripts/experiments/payment-reconciliation.mjs",
+    "test:rabbitmq:consumer-loss": "node scripts/experiments/rabbitmq-consumer-message-loss.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",

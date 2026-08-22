@@ -6,12 +6,16 @@ import {
   PaymentCompletedEvent,
   isPaymentCompletedEvent,
 } from './payment-completed.event';
+import { PaymentCompletedConsumerFaultInjector } from './payment-completed.consumer-fault-injector';
 
 @Injectable()
 export class PaymentCompletedConsumer implements OnModuleInit {
   private readonly logger = new Logger(PaymentCompletedConsumer.name);
 
-  constructor(private readonly rabbitMqService: RabbitMqService) {}
+  constructor(
+    private readonly rabbitMqService: RabbitMqService,
+    private readonly faultInjector: PaymentCompletedConsumerFaultInjector,
+  ) {}
 
   async onModuleInit(): Promise<void> {
     await this.rabbitMqService.consume(
@@ -27,6 +31,7 @@ export class PaymentCompletedConsumer implements OnModuleInit {
 
     try {
       const event = this.parseEvent(message);
+      this.faultInjector.throwIfEnabled(event);
       this.process(event);
       channel.ack(message);
     } catch (error) {

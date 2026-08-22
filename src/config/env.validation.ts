@@ -2,6 +2,7 @@ import { Type, plainToInstance } from 'class-transformer';
 import {
   IsInt,
   IsNotEmpty,
+  IsOptional,
   IsString,
   Max,
   Min,
@@ -40,6 +41,12 @@ class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   RABBITMQ_URL!: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  PAYMENT_COMPLETED_CONSUMER_FAIL_COUNT?: number;
 }
 
 export function validate(config: Record<string, unknown>) {
