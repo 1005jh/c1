@@ -5,11 +5,23 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Channel, ChannelModel, ConsumeMessage, connect } from 'amqplib';
+import {
+  Channel,
+  ChannelModel,
+  ConsumeMessage,
+  Options,
+  connect,
+} from 'amqplib';
 import {
   COMMERCE_EVENTS_EXCHANGE,
   COMMERCE_EVENTS_EXCHANGE_TYPE,
+  PAYMENT_COMPLETED_DEAD_ROUTING_KEY,
+  PAYMENT_COMPLETED_DLQ,
+  PAYMENT_COMPLETED_DLX,
   PAYMENT_COMPLETED_QUEUE,
+  PAYMENT_COMPLETED_RETRY_EXCHANGE,
+  PAYMENT_COMPLETED_RETRY_QUEUE,
+  PAYMENT_COMPLETED_RETRY_ROUTING_KEY,
   PAYMENT_COMPLETED_ROUTING_KEY,
 } from './rabbitmq.constants';
 
@@ -22,6 +34,7 @@ export type RabbitMqMessageHandler = (
 export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RabbitMqService.name);
   private readonly url: string;
+  private readonly paymentCompletedRetryDelayMs: number;
   private connection?: ChannelModel;
   private publisherChannel?: Channel;
   private consumerChannel?: Channel;
@@ -29,6 +42,9 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
 
   constructor(configService: ConfigService) {
     this.url = configService.getOrThrow<string>('RABBITMQ_URL');
+    this.paymentCompletedRetryDelayMs = Number(
+      configService.get<number>('PAYMENT_COMPLETED_RETRY_DELAY_MS') ?? 1000,
+    );
   }
 
   async onModuleInit(): Promise<void> {
@@ -68,6 +84,24 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
         typeof eventLike.eventType === 'string'
           ? eventLike.eventType
           : routingKey,
+    });
+
+    if (!published) {
+      this.logger.warn('RabbitMQ publish buffer is full');
+    }
+  }
+
+  async publishMessage(
+    exchange: string,
+    routingKey: string,
+    content: Buffer,
+    options: Options.Publish = {},
+  ): Promise<void> {
+    const channel = await this.getPublisherChannel();
+
+    const published = channel.publish(exchange, routingKey, content, {
+      ...options,
+      persistent: true,
     });
 
     if (!published) {
@@ -140,6 +174,43 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
       PAYMENT_COMPLETED_QUEUE,
       COMMERCE_EVENTS_EXCHANGE,
       PAYMENT_COMPLETED_ROUTING_KEY,
+    );
+
+    await channel.assertExchange(
+      PAYMENT_COMPLETED_RETRY_EXCHANGE,
+      COMMERCE_EVENTS_EXCHANGE_TYPE,
+      {
+        durable: true,
+      },
+    );
+    await channel.assertQueue(PAYMENT_COMPLETED_RETRY_QUEUE, {
+      durable: true,
+      arguments: {
+        'x-message-ttl': this.paymentCompletedRetryDelayMs,
+        'x-dead-letter-exchange': COMMERCE_EVENTS_EXCHANGE,
+        'x-dead-letter-routing-key': PAYMENT_COMPLETED_ROUTING_KEY,
+      },
+    });
+    await channel.bindQueue(
+      PAYMENT_COMPLETED_RETRY_QUEUE,
+      PAYMENT_COMPLETED_RETRY_EXCHANGE,
+      PAYMENT_COMPLETED_RETRY_ROUTING_KEY,
+    );
+
+    await channel.assertExchange(
+      PAYMENT_COMPLETED_DLX,
+      COMMERCE_EVENTS_EXCHANGE_TYPE,
+      {
+        durable: true,
+      },
+    );
+    await channel.assertQueue(PAYMENT_COMPLETED_DLQ, {
+      durable: true,
+    });
+    await channel.bindQueue(
+      PAYMENT_COMPLETED_DLQ,
+      PAYMENT_COMPLETED_DLX,
+      PAYMENT_COMPLETED_DEAD_ROUTING_KEY,
     );
   }
 

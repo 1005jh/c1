@@ -47,6 +47,18 @@ class EnvironmentVariables {
   @IsInt()
   @Min(0)
   PAYMENT_COMPLETED_CONSUMER_FAIL_COUNT?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  PAYMENT_COMPLETED_MAX_RETRIES?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  PAYMENT_COMPLETED_RETRY_DELAY_MS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {
