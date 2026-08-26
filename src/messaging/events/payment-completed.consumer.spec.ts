@@ -149,6 +149,33 @@ describe('PaymentCompletedConsumer', () => {
     expect(rabbitMqService.publishMessage).not.toHaveBeenCalled();
   });
 
+  it('processes duplicate valid events independently without idempotency filtering', async () => {
+    const event = createEvent(1);
+    const firstMessage = createMessage(JSON.stringify(event));
+    const duplicateMessage = createMessage(JSON.stringify(event));
+
+    await consumer.handleMessage(firstMessage, channel as unknown as Channel);
+    await consumer.handleMessage(
+      duplicateMessage,
+      channel as unknown as Channel,
+    );
+
+    expect(logSpy).toHaveBeenCalledTimes(2);
+    expect(logSpy).toHaveBeenNthCalledWith(
+      1,
+      `Payment completed event consumed: eventId=${event.eventId} paymentId=${event.paymentId} orderId=${event.orderId} amount=${event.amount} providerTransactionId=${event.providerTransactionId}`,
+    );
+    expect(logSpy).toHaveBeenNthCalledWith(
+      2,
+      `Payment completed event consumed: eventId=${event.eventId} paymentId=${event.paymentId} orderId=${event.orderId} amount=${event.amount} providerTransactionId=${event.providerTransactionId}`,
+    );
+    expect(channel.ack).toHaveBeenCalledTimes(2);
+    expect(channel.ack).toHaveBeenNthCalledWith(1, firstMessage);
+    expect(channel.ack).toHaveBeenNthCalledWith(2, duplicateMessage);
+    expect(channel.nack).not.toHaveBeenCalled();
+    expect(rabbitMqService.publishMessage).not.toHaveBeenCalled();
+  });
+
   it('publishes the first failed valid event to retry with retry count one before acking', async () => {
     consumer = createConsumer({ failCount: 1 });
     const event = createEvent(1);
