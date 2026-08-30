@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 import { Inventory } from '../inventories/entities/inventory.entity';
+import { ProcessedMessage } from '../messaging/entities/processed-message.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { Order } from '../orders/entities/order.entity';
 import { Payment } from '../payments/entities/payment.entity';
@@ -30,7 +31,7 @@ export default new DataSource({
   username: requiredEnv('DB_USERNAME'),
   password: requiredEnv('DB_PASSWORD'),
   database: requiredEnv('DB_DATABASE'),
-  entities: [Product, Inventory, Order, OrderItem, Payment],
+  entities: [Product, Inventory, Order, OrderItem, Payment, ProcessedMessage],
   migrations: [__dirname + '/../migrations/*{.ts,.js}'],
   synchronize: false,
 });

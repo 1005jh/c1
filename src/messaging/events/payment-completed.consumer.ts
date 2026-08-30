@@ -16,6 +16,12 @@ import {
   isPaymentCompletedEvent,
 } from './payment-completed.event';
 import { PaymentCompletedConsumerFaultInjector } from './payment-completed.consumer-fault-injector';
+import {
+  ProcessedMessagePersistenceError,
+  ProcessedMessageService,
+} from '../processed-message.service';
+
+export const PAYMENT_COMPLETED_CONSUMER_NAME = 'payment-completed-consumer';
 
 @Injectable()
 export class PaymentCompletedConsumer implements OnModuleInit {
@@ -25,6 +31,7 @@ export class PaymentCompletedConsumer implements OnModuleInit {
   constructor(
     private readonly rabbitMqService: RabbitMqService,
     private readonly faultInjector: PaymentCompletedConsumerFaultInjector,
+    private readonly processedMessageService: ProcessedMessageService,
     configService: ConfigService,
   ) {
     this.maxRetries = Number(
@@ -68,8 +75,23 @@ export class PaymentCompletedConsumer implements OnModuleInit {
 
     try {
       this.faultInjector.throwIfEnabled(event);
-      this.process(event);
+      const result = await this.processedMessageService.processOnce(
+        PAYMENT_COMPLETED_CONSUMER_NAME,
+        event.eventId,
+        event.eventType,
+        () => this.process(event),
+      );
+
+      if (result === 'duplicate') {
+        this.logger.warn(
+          `Payment completed duplicate event skipped: eventId=${event.eventId}`,
+        );
+      }
     } catch (error) {
+      if (error instanceof ProcessedMessagePersistenceError) {
+        throw error;
+      }
+
       this.logger.error(
         `Payment completed event handling failed: ${this.messageFrom(error)}`,
       );

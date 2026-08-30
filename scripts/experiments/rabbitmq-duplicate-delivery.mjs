@@ -23,6 +23,7 @@ const ROUTING_KEY = 'payment.completed';
 const MAIN_QUEUE = 'commerce.payment.completed';
 const RETRY_QUEUE = 'commerce.payment.completed.retry';
 const DLQ = 'commerce.payment.completed.dlq';
+const CONSUMER_NAME = 'payment-completed-consumer';
 
 const parsePositiveInteger = (value, fallback, name) => {
   if (value === undefined || value === '') {
@@ -303,6 +304,26 @@ const readOrder = async (connection, orderId) => {
   return rows[0] ?? null;
 };
 
+const readProcessedMessages = async (connection, eventId) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        id,
+        consumerName,
+        eventId,
+        eventType,
+        processedAt
+      FROM processed_messages
+      WHERE consumerName = ?
+        AND eventId = ?
+      ORDER BY id
+    `,
+    [CONSUMER_NAME, eventId],
+  );
+
+  return rows;
+};
+
 const createPaymentCompletedEvent = (payment) => ({
   eventId: `payment.completed:${payment.id}`,
   eventType: EVENT_TYPE,
@@ -358,11 +379,19 @@ const runRound = async (round, connection, channel) => {
 
   const duplicateEvent = createPaymentCompletedEvent(payment);
   const expectedEventId = `payment.completed:${payment.id}`;
+  const processedMessagesAfterNormal = await readProcessedMessages(
+    connection,
+    duplicateEvent.eventId,
+  );
   const duplicateBefore = await readQueueStates();
   publishDuplicateEvent(channel, duplicateEvent);
   const duplicateAfter = await waitForMainAck(duplicateBefore);
   const duplicateQueueDelta = diffQueueStates(duplicateBefore, duplicateAfter);
   const finalQueueState = await readQueueStates();
+  const processedMessagesAfterDuplicate = await readProcessedMessages(
+    connection,
+    duplicateEvent.eventId,
+  );
   const afterDuplicatePayments = await readPayments(connection, order.id);
   const afterDuplicateProviderCharges = await getProviderCharges(order.id);
   const normalEventDelivered = mainDeliveryObserved(normalQueueDelta);
@@ -370,9 +399,19 @@ const runRound = async (round, connection, channel) => {
   const duplicateEventDelivered = mainDeliveryObserved(duplicateQueueDelta);
   const duplicateEventAcked = mainAckObserved(duplicateQueueDelta);
   const sameEventId = duplicateEvent.eventId === expectedEventId;
-  const successProcessCountInferred =
+  const deliveryCount =
     (normalEventDelivered && normalEventAcked ? 1 : 0) +
     (duplicateEventDelivered && duplicateEventAcked ? 1 : 0);
+  const ackCount =
+    normalQueueDelta.main.ackDelta + duplicateQueueDelta.main.ackDelta;
+  const businessProcessCountInferred = processedMessagesAfterDuplicate.length;
+  const duplicateSkipCountInferred =
+    duplicateEventDelivered &&
+    duplicateEventAcked &&
+    processedMessagesAfterNormal.length === 1 &&
+    processedMessagesAfterDuplicate.length === 1
+      ? 1
+      : 0;
 
   return {
     round,
@@ -400,7 +439,11 @@ const runRound = async (round, connection, channel) => {
       acked: duplicateEventAcked,
       queueDelta: duplicateQueueDelta,
     },
-    successProcessCountInferred,
+    deliveryCount,
+    ackCount,
+    businessProcessCountInferred,
+    duplicateSkipCountInferred,
+    processedMessageRows: processedMessagesAfterDuplicate.length,
     retryQueueTouched:
       normalQueueDelta.retry.publishDelta !== 0 ||
       duplicateQueueDelta.retry.publishDelta !== 0 ||
@@ -454,9 +497,15 @@ const printRound = (result) => {
     })}`,
   );
   console.log(`  Same Event ID: ${result.sameEventId}`);
+  console.log(`  Delivery Count: ${result.deliveryCount}`);
+  console.log(`  ACK Count: ${result.ackCount}`);
   console.log(
-    `  Success Process Count Inferred: ${result.successProcessCountInferred}`,
+    `  Business Process Count Inferred: ${result.businessProcessCountInferred}`,
   );
+  console.log(
+    `  Duplicate Skip Count Inferred: ${result.duplicateSkipCountInferred}`,
+  );
+  console.log(`  Processed Message Rows: ${result.processedMessageRows}`);
   console.log(`  Final Queues: ${JSON.stringify(result.finalQueues)}`);
 };
 
@@ -514,15 +563,24 @@ const main = async () => {
       printRound(result);
     }
 
-    const totalSameEventProcessingCount = roundResults.reduce(
-      (sum, result) => sum + result.successProcessCountInferred,
+    const totalDeliveryCount = roundResults.reduce(
+      (sum, result) => sum + result.deliveryCount,
       0,
     );
     const totalAckCount = roundResults.reduce(
-      (sum, result) =>
-        sum +
-        result.normalEvent.queueDelta.main.ackDelta +
-        result.duplicateEvent.queueDelta.main.ackDelta,
+      (sum, result) => sum + result.ackCount,
+      0,
+    );
+    const totalBusinessProcessCount = roundResults.reduce(
+      (sum, result) => sum + result.businessProcessCountInferred,
+      0,
+    );
+    const totalDuplicateSkipCount = roundResults.reduce(
+      (sum, result) => sum + result.duplicateSkipCountInferred,
+      0,
+    );
+    const totalProcessedMessageRows = roundResults.reduce(
+      (sum, result) => sum + result.processedMessageRows,
       0,
     );
 
@@ -530,7 +588,7 @@ const main = async () => {
     console.log(
       JSON.stringify(
         {
-          duplicateProcessingReproduced: roundResults.every(
+          duplicateProcessingPrevented: roundResults.every(
             (result) =>
               result.sameEventId &&
               result.paymentStatus === 'SUCCESS' &&
@@ -541,12 +599,19 @@ const main = async () => {
               result.normalEvent.acked &&
               result.duplicateEvent.delivered &&
               result.duplicateEvent.acked &&
-              result.successProcessCountInferred === 2 &&
+              result.deliveryCount === 2 &&
+              result.ackCount === 2 &&
+              result.businessProcessCountInferred === 1 &&
+              result.duplicateSkipCountInferred === 1 &&
+              result.processedMessageRows === 1 &&
               !result.retryQueueTouched &&
               !result.dlqTouched,
           ),
-          totalSameEventProcessingCount,
+          totalDeliveryCount,
           totalAckCount,
+          totalBusinessProcessCount,
+          totalDuplicateSkipCount,
+          totalProcessedMessageRows,
           providerDuplicateChargeCreated: roundResults.some(
             (result) => result.providerDuplicateChargeCreated,
           ),

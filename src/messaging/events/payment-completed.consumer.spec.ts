@@ -20,7 +20,14 @@ import {
   PAYMENT_COMPLETED_CONSUMER_FAILURE_MESSAGE,
   PaymentCompletedConsumerFaultInjector,
 } from './payment-completed.consumer-fault-injector';
-import { PaymentCompletedConsumer } from './payment-completed.consumer';
+import {
+  PAYMENT_COMPLETED_CONSUMER_NAME,
+  PaymentCompletedConsumer,
+} from './payment-completed.consumer';
+import {
+  ProcessedMessagePersistenceError,
+  ProcessedMessageService,
+} from '../processed-message.service';
 
 const MAX_RETRIES = 3;
 
@@ -89,6 +96,9 @@ describe('PaymentCompletedConsumer', () => {
   let rabbitMqService: jest.Mocked<
     Pick<RabbitMqService, 'consume' | 'publishMessage'>
   >;
+  let processedMessageService: jest.Mocked<
+    Pick<ProcessedMessageService, 'processOnce'>
+  >;
   let channel: jest.Mocked<Pick<Channel, 'ack' | 'nack'>>;
   let consumer: PaymentCompletedConsumer;
   let logSpy: jest.SpyInstance;
@@ -105,6 +115,7 @@ describe('PaymentCompletedConsumer', () => {
     new PaymentCompletedConsumer(
       rabbitMqService as unknown as RabbitMqService,
       createFaultInjector(failCount),
+      processedMessageService as unknown as ProcessedMessageService,
       createConfigService({ maxRetries }),
     );
 
@@ -112,6 +123,15 @@ describe('PaymentCompletedConsumer', () => {
     rabbitMqService = {
       consume: jest.fn().mockResolvedValue(undefined),
       publishMessage: jest.fn().mockResolvedValue(undefined),
+    };
+    processedMessageService = {
+      processOnce: jest.fn(
+        async (_consumerName, _eventId, _eventType, process) => {
+          await process();
+
+          return 'processed';
+        },
+      ),
     };
     channel = {
       ack: jest.fn(),
@@ -147,12 +167,27 @@ describe('PaymentCompletedConsumer', () => {
     expect(channel.ack).toHaveBeenCalledWith(message);
     expect(channel.nack).not.toHaveBeenCalled();
     expect(rabbitMqService.publishMessage).not.toHaveBeenCalled();
+    expect(processedMessageService.processOnce).toHaveBeenCalledWith(
+      PAYMENT_COMPLETED_CONSUMER_NAME,
+      event.eventId,
+      event.eventType,
+      expect.any(Function),
+    );
   });
 
-  it('processes duplicate valid events independently without idempotency filtering', async () => {
+  it('skips duplicate valid events after the first processing and still acks them', async () => {
     const event = createEvent(1);
     const firstMessage = createMessage(JSON.stringify(event));
     const duplicateMessage = createMessage(JSON.stringify(event));
+    processedMessageService.processOnce
+      .mockImplementationOnce(
+        async (_consumerName, _eventId, _eventType, process) => {
+          await process();
+
+          return 'processed';
+        },
+      )
+      .mockResolvedValueOnce('duplicate');
 
     await consumer.handleMessage(firstMessage, channel as unknown as Channel);
     await consumer.handleMessage(
@@ -160,18 +195,32 @@ describe('PaymentCompletedConsumer', () => {
       channel as unknown as Channel,
     );
 
-    expect(logSpy).toHaveBeenCalledTimes(2);
-    expect(logSpy).toHaveBeenNthCalledWith(
-      1,
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(logSpy).toHaveBeenCalledWith(
       `Payment completed event consumed: eventId=${event.eventId} paymentId=${event.paymentId} orderId=${event.orderId} amount=${event.amount} providerTransactionId=${event.providerTransactionId}`,
     );
-    expect(logSpy).toHaveBeenNthCalledWith(
-      2,
-      `Payment completed event consumed: eventId=${event.eventId} paymentId=${event.paymentId} orderId=${event.orderId} amount=${event.amount} providerTransactionId=${event.providerTransactionId}`,
+    expect(warnSpy).toHaveBeenCalledWith(
+      `Payment completed duplicate event skipped: eventId=${event.eventId}`,
     );
     expect(channel.ack).toHaveBeenCalledTimes(2);
     expect(channel.ack).toHaveBeenNthCalledWith(1, firstMessage);
     expect(channel.ack).toHaveBeenNthCalledWith(2, duplicateMessage);
+    expect(channel.nack).not.toHaveBeenCalled();
+    expect(rabbitMqService.publishMessage).not.toHaveBeenCalled();
+    expect(processedMessageService.processOnce).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not ack when processed message persistence fails with a general DB error', async () => {
+    const message = createMessage(JSON.stringify(createEvent(1)));
+    processedMessageService.processOnce.mockRejectedValueOnce(
+      new ProcessedMessagePersistenceError(new Error('database unavailable')),
+    );
+
+    await expect(
+      consumer.handleMessage(message, channel as unknown as Channel),
+    ).rejects.toThrow('Failed to record processed message');
+
+    expect(channel.ack).not.toHaveBeenCalled();
     expect(channel.nack).not.toHaveBeenCalled();
     expect(rabbitMqService.publishMessage).not.toHaveBeenCalled();
   });
@@ -201,6 +250,7 @@ describe('PaymentCompletedConsumer', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       `Payment completed event retry scheduled: eventId=${event.eventId} retry=1/${MAX_RETRIES}`,
     );
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('increments retry count one to two after a failed retried event', async () => {
@@ -222,6 +272,7 @@ describe('PaymentCompletedConsumer', () => {
       }),
     );
     expect(channel.ack).toHaveBeenCalledWith(message);
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('increments retry count two to three after a failed retried event', async () => {
@@ -243,6 +294,7 @@ describe('PaymentCompletedConsumer', () => {
       }),
     );
     expect(channel.ack).toHaveBeenCalledWith(message);
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('moves a failed event to DLQ when retry count already reached max retries', async () => {
@@ -269,6 +321,7 @@ describe('PaymentCompletedConsumer', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       `Payment completed event moved to DLQ: eventId=${event.eventId} retryCount=${MAX_RETRIES}`,
     );
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('moves invalid JSON directly to DLQ without retrying', async () => {
@@ -295,6 +348,7 @@ describe('PaymentCompletedConsumer', () => {
     );
     expect(channel.ack).toHaveBeenCalledWith(message);
     expect(channel.nack).not.toHaveBeenCalled();
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('moves invalid payload directly to DLQ without retrying', async () => {
@@ -326,6 +380,7 @@ describe('PaymentCompletedConsumer', () => {
     );
     expect(channel.ack).toHaveBeenCalledWith(message);
     expect(channel.nack).not.toHaveBeenCalled();
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('does not ack the original message when retry publish throws', async () => {
@@ -341,6 +396,7 @@ describe('PaymentCompletedConsumer', () => {
 
     expect(channel.ack).not.toHaveBeenCalled();
     expect(channel.nack).not.toHaveBeenCalled();
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('does not ack the original message when DLQ publish throws', async () => {
@@ -358,6 +414,7 @@ describe('PaymentCompletedConsumer', () => {
 
     expect(channel.ack).not.toHaveBeenCalled();
     expect(channel.nack).not.toHaveBeenCalled();
+    expect(processedMessageService.processOnce).not.toHaveBeenCalled();
   });
 
   it('acks a retried event that later succeeds without scheduling another retry', async () => {
@@ -382,6 +439,7 @@ describe('PaymentCompletedConsumer', () => {
     );
     expect(channel.ack).toHaveBeenCalledWith(failedMessage);
     expect(channel.ack).toHaveBeenCalledWith(successfulMessage);
+    expect(processedMessageService.processOnce).toHaveBeenCalledTimes(1);
   });
 
   it('applies fault injection after JSON parsing and event validation', async () => {
@@ -430,5 +488,6 @@ describe('PaymentCompletedConsumer', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       `Payment completed event handling failed: ${PAYMENT_COMPLETED_CONSUMER_FAILURE_MESSAGE}`,
     );
+    expect(processedMessageService.processOnce).toHaveBeenCalledTimes(1);
   });
 });
