@@ -46,6 +46,12 @@ class EnvironmentVariables {
   @Type(() => Number)
   @IsInt()
   @Min(0)
+  PAYMENT_COMPLETED_PUBLISH_FAIL_COUNT?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
   PAYMENT_COMPLETED_CONSUMER_FAIL_COUNT?: number;
 
   @IsOptional()

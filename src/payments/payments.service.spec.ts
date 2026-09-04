@@ -34,6 +34,7 @@ describe('PaymentsService', () => {
   let paymentRepository: MockRepository<Payment>;
   let transactionalOrderRepository: MockRepository<Order>;
   let transactionalPaymentRepository: MockRepository<Payment>;
+  let transactionalManager: { getRepository: jest.Mock };
   let fakePaymentClient: jest.Mocked<
     Pick<FakePaymentClient, 'charge' | 'getChargeByIdempotencyKey'>
   >;
@@ -54,7 +55,7 @@ describe('PaymentsService', () => {
       publish: jest.fn().mockResolvedValue(undefined),
     };
 
-    const manager = {
+    transactionalManager = {
       getRepository: jest.fn((entity) => {
         if (entity === Order) {
           return transactionalOrderRepository;
@@ -69,7 +70,7 @@ describe('PaymentsService', () => {
     };
 
     dataSource = {
-      transaction: jest.fn((callback) => callback(manager)),
+      transaction: jest.fn((callback) => callback(transactionalManager)),
       getRepository: jest.fn((entity) => {
         if (entity === Order) {
           return orderRepository;
@@ -157,6 +158,61 @@ describe('PaymentsService', () => {
       expect(paymentCompletedPublisher.publish).toHaveBeenCalledTimes(1);
       expect(paymentCompletedPublisher.publish).toHaveBeenCalledWith(payment);
       expect(dataSource.transaction.mock.invocationCallOrder[0]).toBeLessThan(
+        paymentCompletedPublisher.publish.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('rejects after transaction callback completes when completed event publish fails', async () => {
+      const order = {
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      } as Order;
+      const payment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.SUCCESS,
+        providerTransactionId: 'tx_1',
+      } as Payment;
+      const publishError = new Error('publish failed');
+      let transactionCallbackCompleted = false;
+
+      dataSource.transaction.mockImplementationOnce(async (callback) => {
+        const result = await callback(transactionalManager);
+        transactionCallbackCompleted = true;
+
+        return result;
+      });
+      paymentCompletedPublisher.publish.mockImplementationOnce(async () => {
+        expect(transactionCallbackCompleted).toBe(true);
+        throw publishError;
+      });
+      orderRepository.findOne?.mockResolvedValue(order);
+      paymentRepository.findOne?.mockResolvedValue(null);
+      fakePaymentClient.charge.mockResolvedValue({
+        transactionId: 'tx_1',
+        status: PaymentStatus.SUCCESS,
+      });
+      transactionalPaymentRepository.findOne?.mockResolvedValue(null);
+      transactionalPaymentRepository.create?.mockImplementation(
+        (value) => value,
+      );
+      transactionalPaymentRepository.save?.mockResolvedValue(payment);
+      transactionalOrderRepository.save?.mockResolvedValue({
+        ...order,
+        status: OrderStatus.PAID,
+      });
+
+      await expect(service.payOrder(1)).rejects.toBe(publishError);
+
+      expect(transactionalPaymentRepository.save).toHaveBeenCalledTimes(1);
+      expect(order.status).toBe(OrderStatus.PAID);
+      expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
+      expect(paymentCompletedPublisher.publish).toHaveBeenCalledWith(payment);
+      expect(
+        transactionalOrderRepository.save?.mock.invocationCallOrder[0],
+      ).toBeLessThan(
         paymentCompletedPublisher.publish.mock.invocationCallOrder[0],
       );
     });
