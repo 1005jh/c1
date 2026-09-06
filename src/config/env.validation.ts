@@ -1,6 +1,7 @@
 import { Type, plainToInstance } from 'class-transformer';
 import {
   IsInt,
+  IsIn,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -65,6 +66,23 @@ class EnvironmentVariables {
   @IsInt()
   @Min(1)
   PAYMENT_COMPLETED_RETRY_DELAY_MS?: number;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['true', 'false'])
+  OUTBOX_RELAY_ENABLED?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  OUTBOX_RELAY_INTERVAL_MS?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  OUTBOX_RELAY_BATCH_SIZE?: number;
 }
 
 export function validate(config: Record<string, unknown>) {

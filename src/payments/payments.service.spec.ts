@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataSource, Repository } from 'typeorm';
-import { PaymentCompletedPublisher } from '../messaging/events/payment-completed.publisher';
+import { PaymentCompletedOutboxWriter } from '../messaging/outbox/payment-completed-outbox.writer';
 import { OrderStatus } from '../orders/entities/order-status.enum';
 import { Order } from '../orders/entities/order.entity';
 import { FakePaymentClient } from './clients/fake-payment.client';
@@ -38,8 +38,8 @@ describe('PaymentsService', () => {
   let fakePaymentClient: jest.Mocked<
     Pick<FakePaymentClient, 'charge' | 'getChargeByIdempotencyKey'>
   >;
-  let paymentCompletedPublisher: jest.Mocked<
-    Pick<PaymentCompletedPublisher, 'publish'>
+  let paymentCompletedOutboxWriter: jest.Mocked<
+    Pick<PaymentCompletedOutboxWriter, 'enqueue'>
   >;
 
   beforeEach(async () => {
@@ -51,8 +51,8 @@ describe('PaymentsService', () => {
       charge: jest.fn(),
       getChargeByIdempotencyKey: jest.fn(),
     };
-    paymentCompletedPublisher = {
-      publish: jest.fn().mockResolvedValue(undefined),
+    paymentCompletedOutboxWriter = {
+      enqueue: jest.fn().mockResolvedValue(undefined),
     };
 
     transactionalManager = {
@@ -96,8 +96,8 @@ describe('PaymentsService', () => {
           useValue: fakePaymentClient,
         },
         {
-          provide: PaymentCompletedPublisher,
-          useValue: paymentCompletedPublisher,
+          provide: PaymentCompletedOutboxWriter,
+          useValue: paymentCompletedOutboxWriter,
         },
       ],
     }).compile();
@@ -155,14 +155,19 @@ describe('PaymentsService', () => {
       expect(transactionalPaymentRepository.save).toHaveBeenCalled();
       expect(order.status).toBe(OrderStatus.PAID);
       expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
-      expect(paymentCompletedPublisher.publish).toHaveBeenCalledTimes(1);
-      expect(paymentCompletedPublisher.publish).toHaveBeenCalledWith(payment);
-      expect(dataSource.transaction.mock.invocationCallOrder[0]).toBeLessThan(
-        paymentCompletedPublisher.publish.mock.invocationCallOrder[0],
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledWith(
+        transactionalManager,
+        payment,
+      );
+      expect(
+        transactionalOrderRepository.save?.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        paymentCompletedOutboxWriter.enqueue.mock.invocationCallOrder[0],
       );
     });
 
-    it('rejects after transaction callback completes when completed event publish fails', async () => {
+    it('rejects when outbox enqueue fails inside the payment transaction', async () => {
       const order = {
         id: 1,
         status: OrderStatus.PENDING_PAYMENT,
@@ -175,19 +180,8 @@ describe('PaymentsService', () => {
         status: PaymentStatus.SUCCESS,
         providerTransactionId: 'tx_1',
       } as Payment;
-      const publishError = new Error('publish failed');
-      let transactionCallbackCompleted = false;
-
-      dataSource.transaction.mockImplementationOnce(async (callback) => {
-        const result = await callback(transactionalManager);
-        transactionCallbackCompleted = true;
-
-        return result;
-      });
-      paymentCompletedPublisher.publish.mockImplementationOnce(async () => {
-        expect(transactionCallbackCompleted).toBe(true);
-        throw publishError;
-      });
+      const outboxError = new Error('outbox insert failed');
+      paymentCompletedOutboxWriter.enqueue.mockRejectedValueOnce(outboxError);
       orderRepository.findOne?.mockResolvedValue(order);
       paymentRepository.findOne?.mockResolvedValue(null);
       fakePaymentClient.charge.mockResolvedValue({
@@ -204,16 +198,19 @@ describe('PaymentsService', () => {
         status: OrderStatus.PAID,
       });
 
-      await expect(service.payOrder(1)).rejects.toBe(publishError);
+      await expect(service.payOrder(1)).rejects.toBe(outboxError);
 
       expect(transactionalPaymentRepository.save).toHaveBeenCalledTimes(1);
       expect(order.status).toBe(OrderStatus.PAID);
       expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
-      expect(paymentCompletedPublisher.publish).toHaveBeenCalledWith(payment);
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledWith(
+        transactionalManager,
+        payment,
+      );
       expect(
         transactionalOrderRepository.save?.mock.invocationCallOrder[0],
       ).toBeLessThan(
-        paymentCompletedPublisher.publish.mock.invocationCallOrder[0],
+        paymentCompletedOutboxWriter.enqueue.mock.invocationCallOrder[0],
       );
     });
 
@@ -225,7 +222,7 @@ describe('PaymentsService', () => {
       );
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('throws ConflictException when order is already paid', async () => {
@@ -241,7 +238,7 @@ describe('PaymentsService', () => {
       );
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('returns existing successful payment without charging provider', async () => {
@@ -263,7 +260,7 @@ describe('PaymentsService', () => {
       await expect(service.payOrder(1)).resolves.toBe(existingPayment);
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('returns existing payment when order is already paid', async () => {
@@ -285,7 +282,7 @@ describe('PaymentsService', () => {
       await expect(service.payOrder(1)).resolves.toBe(existingPayment);
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('stores unknown payment and keeps order pending when provider outcome is unknown', async () => {
@@ -325,7 +322,7 @@ describe('PaymentsService', () => {
       expect(transactionalPaymentRepository.save).toHaveBeenCalled();
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
       expect(order.status).toBe(OrderStatus.PENDING_PAYMENT);
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('does not charge provider again when payment outcome is already unknown', async () => {
@@ -349,7 +346,7 @@ describe('PaymentsService', () => {
       );
       expect(fakePaymentClient.charge).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('recovers existing payment after duplicate insert race', async () => {
@@ -397,7 +394,7 @@ describe('PaymentsService', () => {
         where: { orderId: 1 },
       });
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('recovers existing payment after payment insert deadlock race', async () => {
@@ -437,7 +434,7 @@ describe('PaymentsService', () => {
 
       await expect(service.payOrder(1)).resolves.toBe(existingPayment);
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('does not hide general database errors', async () => {
@@ -467,7 +464,7 @@ describe('PaymentsService', () => {
         idempotencyKey: 'payment:order:1',
       });
       expect(paymentRepository.findOne).toHaveBeenCalledTimes(1);
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('does not create payment or mark order paid when provider fails', async () => {
@@ -488,7 +485,7 @@ describe('PaymentsService', () => {
       expect(transactionalPaymentRepository.save).not.toHaveBeenCalled();
       expect(transactionalOrderRepository.save).not.toHaveBeenCalled();
       expect(order.status).toBe(OrderStatus.PENDING_PAYMENT);
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('uses the same transaction manager for payment and order changes', async () => {
@@ -518,7 +515,14 @@ describe('PaymentsService', () => {
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
       expect(transactionalPaymentRepository.save).toHaveBeenCalledTimes(1);
       expect(transactionalOrderRepository.save).toHaveBeenCalledTimes(1);
-      expect(paymentCompletedPublisher.publish).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledWith(
+        transactionalManager,
+        expect.objectContaining({
+          id: 1,
+          orderId: 1,
+        }),
+      );
     });
   });
 
@@ -573,14 +577,66 @@ describe('PaymentsService', () => {
       expect(order.status).toBe(OrderStatus.PAID);
       expect(transactionalPaymentRepository.save).toHaveBeenCalledWith(payment);
       expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
-      expect(paymentCompletedPublisher.publish).toHaveBeenCalledTimes(1);
-      expect(paymentCompletedPublisher.publish).toHaveBeenCalledWith({
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledTimes(1);
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledWith(
+        transactionalManager,
+        {
+          ...payment,
+          status: PaymentStatus.SUCCESS,
+          providerTransactionId: 'tx_1',
+        },
+      );
+      expect(
+        transactionalOrderRepository.save?.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        paymentCompletedOutboxWriter.enqueue.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('rejects when outbox enqueue fails inside the reconciliation transaction', async () => {
+      const order = {
+        id: 1,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalAmount: 30000,
+      } as Order;
+      const payment = {
+        id: 1,
+        orderId: 1,
+        amount: 30000,
+        status: PaymentStatus.UNKNOWN,
+        providerTransactionId: null,
+      } as Payment;
+      const savedPayment = {
         ...payment,
         status: PaymentStatus.SUCCESS,
         providerTransactionId: 'tx_1',
+      } as Payment;
+      const outboxError = new Error('outbox insert failed');
+
+      orderRepository.findOne?.mockResolvedValue(order);
+      paymentRepository.findOne?.mockResolvedValue(payment);
+      fakePaymentClient.getChargeByIdempotencyKey.mockResolvedValue({
+        found: true,
+        transactionId: 'tx_1',
+        status: PaymentStatus.SUCCESS,
+        orderId: 1,
+        amount: 30000,
       });
-      expect(dataSource.transaction.mock.invocationCallOrder[0]).toBeLessThan(
-        paymentCompletedPublisher.publish.mock.invocationCallOrder[0],
+      transactionalPaymentRepository.findOne?.mockResolvedValue(payment);
+      transactionalPaymentRepository.save?.mockResolvedValue(savedPayment);
+      transactionalOrderRepository.save?.mockResolvedValue({
+        ...order,
+        status: OrderStatus.PAID,
+      });
+      paymentCompletedOutboxWriter.enqueue.mockRejectedValueOnce(outboxError);
+
+      await expect(service.reconcileOrder(1)).rejects.toBe(outboxError);
+
+      expect(transactionalPaymentRepository.save).toHaveBeenCalledWith(payment);
+      expect(transactionalOrderRepository.save).toHaveBeenCalledWith(order);
+      expect(paymentCompletedOutboxWriter.enqueue).toHaveBeenCalledWith(
+        transactionalManager,
+        savedPayment,
       );
     });
 
@@ -609,7 +665,7 @@ describe('PaymentsService', () => {
       expect(payment.status).toBe(PaymentStatus.UNKNOWN);
       expect(payment.providerTransactionId).toBeNull();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('returns existing successful payment without provider lookup', async () => {
@@ -633,7 +689,7 @@ describe('PaymentsService', () => {
         fakePaymentClient.getChargeByIdempotencyKey,
       ).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
 
     it('is idempotent when repeated after successful reconciliation', async () => {
@@ -658,7 +714,7 @@ describe('PaymentsService', () => {
         fakePaymentClient.getChargeByIdempotencyKey,
       ).not.toHaveBeenCalled();
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(paymentCompletedPublisher.publish).not.toHaveBeenCalled();
+      expect(paymentCompletedOutboxWriter.enqueue).not.toHaveBeenCalled();
     });
   });
 });

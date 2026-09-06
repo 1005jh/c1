@@ -1,14 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { Payment } from '../../payments/entities/payment.entity';
 import {
   COMMERCE_EVENTS_EXCHANGE,
   PAYMENT_COMPLETED_ROUTING_KEY,
 } from '../rabbitmq/rabbitmq.constants';
 import { RabbitMqService } from '../rabbitmq/rabbitmq.service';
-import {
-  PaymentCompletedEvent,
-  createPaymentCompletedEvent,
-} from './payment-completed.event';
+import { PaymentCompletedEvent } from './payment-completed.event';
 import { PaymentCompletedPublisherFaultInjector } from './payment-completed.publisher-fault-injector';
 
 @Injectable()
@@ -18,9 +14,7 @@ export class PaymentCompletedPublisher {
     private readonly faultInjector: PaymentCompletedPublisherFaultInjector,
   ) {}
 
-  async publish(payment: Payment): Promise<PaymentCompletedEvent> {
-    const event = createPaymentCompletedEvent(payment);
-
+  async publish(event: PaymentCompletedEvent): Promise<PaymentCompletedEvent> {
     this.faultInjector.throwIfEnabled(event);
 
     await this.rabbitMqService.publishJson(

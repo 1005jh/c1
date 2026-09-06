@@ -1,6 +1,4 @@
 import { ConfigService } from '@nestjs/config';
-import { PaymentStatus } from '../../payments/entities/payment-status.enum';
-import { Payment } from '../../payments/entities/payment.entity';
 import {
   COMMERCE_EVENTS_EXCHANGE,
   PAYMENT_COMPLETED_ROUTING_KEY,
@@ -9,6 +7,7 @@ import { RabbitMqService } from '../rabbitmq/rabbitmq.service';
 import {
   PAYMENT_COMPLETED_EVENT_TYPE,
   PAYMENT_COMPLETED_EVENT_VERSION,
+  PaymentCompletedEvent,
 } from './payment-completed.event';
 import { PaymentCompletedPublisher } from './payment-completed.publisher';
 import {
@@ -30,14 +29,17 @@ describe('PaymentCompletedPublisher', () => {
       ),
     }) as unknown as ConfigService;
 
-  const createSuccessPayment = (id = 1) =>
+  const createEvent = (id = 1): PaymentCompletedEvent =>
     ({
-      id,
+      eventId: `payment.completed:${id}`,
+      eventType: PAYMENT_COMPLETED_EVENT_TYPE,
+      eventVersion: PAYMENT_COMPLETED_EVENT_VERSION,
+      occurredAt: '2026-09-06T00:00:00.000Z',
+      paymentId: id,
       orderId: 2,
       amount: 30000,
-      status: PaymentStatus.SUCCESS,
       providerTransactionId: `tx_${id}`,
-    }) as Payment;
+    }) as PaymentCompletedEvent;
 
   const createPublisher = (publishFailCount: number) => {
     rabbitMqService = {
@@ -57,9 +59,9 @@ describe('PaymentCompletedPublisher', () => {
   });
 
   it('publishes payment.completed event with expected exchange, routing key, and payload', async () => {
-    const payment = createSuccessPayment();
+    const event = createEvent();
 
-    await expect(publisher.publish(payment)).resolves.toMatchObject({
+    await expect(publisher.publish(event)).resolves.toMatchObject({
       eventId: 'payment.completed:1',
       eventType: PAYMENT_COMPLETED_EVENT_TYPE,
       eventVersion: PAYMENT_COMPLETED_EVENT_VERSION,
@@ -76,7 +78,7 @@ describe('PaymentCompletedPublisher', () => {
         eventId: 'payment.completed:1',
         eventType: PAYMENT_COMPLETED_EVENT_TYPE,
         eventVersion: PAYMENT_COMPLETED_EVENT_VERSION,
-        occurredAt: expect.any(String),
+        occurredAt: '2026-09-06T00:00:00.000Z',
         paymentId: 1,
         orderId: 2,
         amount: 30000,
@@ -86,9 +88,9 @@ describe('PaymentCompletedPublisher', () => {
   });
 
   it('keeps the payment.completed event contract free of publish fault fields', async () => {
-    const payment = createSuccessPayment();
+    const event = createEvent();
 
-    await expect(publisher.publish(payment)).resolves.not.toEqual(
+    await expect(publisher.publish(event)).resolves.not.toEqual(
       expect.objectContaining({
         shouldFail: expect.anything(),
         testMode: expect.anything(),
@@ -109,9 +111,9 @@ describe('PaymentCompletedPublisher', () => {
 
   it('publishes normally when publish fail count is zero', async () => {
     createPublisher(0);
-    const payment = createSuccessPayment();
+    const event = createEvent();
 
-    await expect(publisher.publish(payment)).resolves.toMatchObject({
+    await expect(publisher.publish(event)).resolves.toMatchObject({
       eventId: 'payment.completed:1',
     });
 
@@ -120,9 +122,9 @@ describe('PaymentCompletedPublisher', () => {
 
   it('fails before RabbitMQ publishJson while publish fail count remains', async () => {
     createPublisher(1);
-    const payment = createSuccessPayment();
+    const event = createEvent();
 
-    await expect(publisher.publish(payment)).rejects.toThrow(
+    await expect(publisher.publish(event)).rejects.toThrow(
       PAYMENT_COMPLETED_PUBLISH_FAILURE_MESSAGE,
     );
 
@@ -131,13 +133,13 @@ describe('PaymentCompletedPublisher', () => {
 
   it('publishes the next event after the configured publish failure is consumed', async () => {
     createPublisher(1);
-    const failedPayment = createSuccessPayment(1);
-    const secondPayment = createSuccessPayment(2);
+    const failedEvent = createEvent(1);
+    const secondEvent = createEvent(2);
 
-    await expect(publisher.publish(failedPayment)).rejects.toThrow(
+    await expect(publisher.publish(failedEvent)).rejects.toThrow(
       PAYMENT_COMPLETED_PUBLISH_FAILURE_MESSAGE,
     );
-    await expect(publisher.publish(secondPayment)).resolves.toMatchObject({
+    await expect(publisher.publish(secondEvent)).resolves.toMatchObject({
       eventId: 'payment.completed:2',
     });
 
@@ -149,20 +151,5 @@ describe('PaymentCompletedPublisher', () => {
         eventId: 'payment.completed:2',
       }),
     );
-  });
-
-  it('rejects completed event creation when provider transaction id is missing', async () => {
-    const payment = {
-      id: 1,
-      orderId: 2,
-      amount: 30000,
-      status: PaymentStatus.UNKNOWN,
-      providerTransactionId: null,
-    } as Payment;
-
-    await expect(publisher.publish(payment)).rejects.toThrow(
-      'Payment completed event requires providerTransactionId',
-    );
-    expect(rabbitMqService.publishJson).not.toHaveBeenCalled();
   });
 });
