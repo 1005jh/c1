@@ -8,6 +8,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { CreateProductDto } from './dto/create-product.dto';
+import { GetProductsCursorQueryDto } from './dto/get-products-cursor-query.dto';
 import { GetProductsQueryDto } from './dto/get-products-query.dto';
 import { ProductsService } from './products.service';
 
@@ -23,6 +24,11 @@ export class ProductsController {
   @Get()
   findAll(@Query() query: GetProductsQueryDto) {
     return this.productsService.findAll(query);
+  }
+
+  @Get('cursor')
+  findAllByCursor(@Query() query: GetProductsCursorQueryDto) {
+    return this.productsService.findAllByCursor(query);
   }
 
   @Get(':id')

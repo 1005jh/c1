@@ -1,7 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { LessThan, Repository } from 'typeorm';
 import { Product } from './entities/product.entity';
 import { ProductsService } from './products.service';
 
@@ -13,6 +13,7 @@ const createMockRepository = (): MockRepository<Product> => ({
   create: jest.fn(),
   save: jest.fn(),
   findOne: jest.fn(),
+  find: jest.fn(),
   findAndCount: jest.fn(),
 });
 
@@ -92,6 +93,76 @@ describe('ProductsService', () => {
         order: { id: 'DESC' },
         skip: 10,
         take: 10,
+      });
+    });
+  });
+
+  describe('findAllByCursor', () => {
+    it('reads the first cursor page by id desc with limit plus one', async () => {
+      const rows = [
+        { id: 30, name: 'Product 30', price: 30000 },
+        { id: 29, name: 'Product 29', price: 29000 },
+      ] as Product[];
+
+      repository.find?.mockResolvedValue(rows);
+
+      await expect(service.findAllByCursor({ limit: 20 })).resolves.toEqual({
+        items: rows,
+        limit: 20,
+        nextCursor: null,
+        hasNext: false,
+      });
+      expect(repository.find).toHaveBeenCalledWith({
+        order: { id: 'DESC' },
+        take: 21,
+      });
+    });
+
+    it('uses id less than cursorId for the next cursor page', async () => {
+      repository.find?.mockResolvedValue([]);
+
+      await service.findAllByCursor({ cursorId: 50, limit: 20 });
+
+      expect(repository.find).toHaveBeenCalledWith({
+        where: { id: LessThan(50) },
+        order: { id: 'DESC' },
+        take: 21,
+      });
+    });
+
+    it('returns limit items with hasNext true and nextCursor from the last returned item', async () => {
+      const rows = Array.from({ length: 21 }, (_, index) => ({
+        id: 100 - index,
+        name: `Product ${100 - index}`,
+        price: 1000 + index,
+      })) as Product[];
+
+      repository.find?.mockResolvedValue(rows);
+
+      await expect(service.findAllByCursor({ limit: 20 })).resolves.toEqual({
+        items: rows.slice(0, 20),
+        limit: 20,
+        nextCursor: 81,
+        hasNext: true,
+      });
+    });
+
+    it('returns no next cursor when rows do not exceed the requested limit', async () => {
+      const rows = Array.from({ length: 20 }, (_, index) => ({
+        id: 20 - index,
+        name: `Product ${20 - index}`,
+        price: 1000 + index,
+      })) as Product[];
+
+      repository.find?.mockResolvedValue(rows);
+
+      await expect(
+        service.findAllByCursor({ cursorId: 21, limit: 20 }),
+      ).resolves.toEqual({
+        items: rows,
+        limit: 20,
+        nextCursor: null,
+        hasNext: false,
       });
     });
   });
