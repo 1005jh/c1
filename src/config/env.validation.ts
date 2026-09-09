@@ -83,6 +83,21 @@ class EnvironmentVariables {
   @IsInt()
   @Min(1)
   OUTBOX_RELAY_BATCH_SIZE?: number;
+
+  @IsOptional()
+  @IsString()
+  REDIS_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['true', 'false'])
+  PRODUCT_CURSOR_CACHE_ENABLED?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  PRODUCT_CURSOR_CACHE_TTL_SECONDS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {

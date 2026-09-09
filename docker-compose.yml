@@ -24,6 +24,13 @@ services:
     volumes:
       - commerce_rabbitmq_data:/var/lib/rabbitmq
 
+  redis:
+    image: redis:7-alpine
+    container_name: commerce-redis
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+
 volumes:
   commerce_mysql_data:
   commerce_rabbitmq_data:

@@ -5,12 +5,17 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { GetProductsCursorQueryDto } from './dto/get-products-cursor-query.dto';
 import { GetProductsQueryDto } from './dto/get-products-query.dto';
 import { Product } from './entities/product.entity';
+import {
+  ProductCursorCacheService,
+  ProductCursorResponse,
+} from './product-cursor-cache.service';
 
 @Injectable()
 export class ProductsService {
   constructor(
     @InjectRepository(Product)
     private readonly productsRepository: Repository<Product>,
+    private readonly cursorCache: ProductCursorCacheService,
   ) {}
 
   async create(createProductDto: CreateProductDto): Promise<Product> {
@@ -19,7 +24,9 @@ export class ProductsService {
       description: createProductDto.description ?? null,
     });
 
-    return this.productsRepository.save(product);
+    const savedProduct = await this.productsRepository.save(product);
+    await this.cursorCache.invalidate();
+    return savedProduct;
   }
 
   async findOne(id: number): Promise<Product> {
@@ -48,7 +55,17 @@ export class ProductsService {
     };
   }
 
-  async findAllByCursor(query: GetProductsCursorQueryDto) {
+  async findAllByCursor(
+    query: GetProductsCursorQueryDto,
+  ): Promise<ProductCursorResponse> {
+    const cacheable = this.cursorCache.isCacheable(query);
+    if (cacheable) {
+      const cached = await this.cursorCache.get();
+      if (cached) {
+        return cached;
+      }
+    }
+
     const { cursorId, limit } = query;
     const options: FindManyOptions<Product> = {
       order: { id: 'DESC' },
@@ -65,11 +82,17 @@ export class ProductsService {
     const nextCursor =
       hasNext && items.length > 0 ? items[items.length - 1].id : null;
 
-    return {
+    const response = {
       items,
       limit,
       nextCursor,
       hasNext,
     };
+
+    if (cacheable) {
+      await this.cursorCache.set(response);
+    }
+
+    return response;
   }
 }
