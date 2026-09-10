@@ -27,6 +27,7 @@
     "test:rabbitmq:consumer-loss": "node scripts/experiments/rabbitmq-consumer-message-loss.mjs",
     "test:rabbitmq:duplicate-delivery": "node scripts/experiments/rabbitmq-duplicate-delivery.mjs",
     "test:rabbitmq:retry-dlq": "node scripts/experiments/rabbitmq-retry-dlq.mjs",
+    "test:rabbitmq:publisher-confirm": "node scripts/experiments/publisher-confirm-outbox-window.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",

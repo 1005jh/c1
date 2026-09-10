@@ -46,6 +46,18 @@ class EnvironmentVariables {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  OUTBOX_MARK_PUBLISHED_FAIL_COUNT?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
   @Min(0)
   PAYMENT_COMPLETED_PUBLISH_FAIL_COUNT?: number;
 

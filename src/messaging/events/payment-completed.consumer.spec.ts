@@ -158,6 +158,66 @@ describe('PaymentCompletedConsumer', () => {
     );
   });
 
+  it.each([0, MAX_RETRIES])(
+    'waits for replacement confirmation before ACK at retryCount=%i',
+    async (retryCount) => {
+      consumer = createConsumer({ failCount: 1 });
+      const message = createMessage(JSON.stringify(createEvent(1)), {
+        [PAYMENT_COMPLETED_RETRY_COUNT_HEADER]: retryCount,
+      });
+      let confirm!: () => void;
+      rabbitMqService.publishMessage.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          confirm = resolve;
+        }),
+      );
+      const pending = consumer.handleMessage(
+        message,
+        channel as unknown as Channel,
+      );
+      await Promise.resolve();
+      expect(rabbitMqService.publishMessage).toHaveBeenCalledTimes(1);
+      expect(channel.ack).not.toHaveBeenCalled();
+      confirm();
+      await pending;
+      expect(channel.ack).toHaveBeenCalledWith(message);
+    },
+  );
+
+  it.each([
+    [0, 'message nacked'],
+    [0, 'confirm timeout'],
+    [MAX_RETRIES, 'message nacked'],
+    [MAX_RETRIES, 'confirm timeout'],
+  ])(
+    'does not ACK a failed handoff at retryCount=%i: %s',
+    async (retryCount, reason) => {
+      consumer = createConsumer({ failCount: 1 });
+      const message = createMessage(JSON.stringify(createEvent(1)), {
+        [PAYMENT_COMPLETED_RETRY_COUNT_HEADER]: retryCount,
+      });
+      rabbitMqService.publishMessage.mockRejectedValueOnce(
+        new Error(String(reason)),
+      );
+      await expect(
+        consumer.handleMessage(message, channel as unknown as Channel),
+      ).rejects.toThrow(String(reason));
+      expect(channel.ack).not.toHaveBeenCalled();
+      expect(channel.nack).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not ACK invalid JSON when the direct DLQ handoff fails', async () => {
+    const message = createMessage('{');
+    rabbitMqService.publishMessage.mockRejectedValueOnce(
+      new Error('confirm timeout'),
+    );
+    await expect(
+      consumer.handleMessage(message, channel as unknown as Channel),
+    ).rejects.toThrow('confirm timeout');
+    expect(channel.ack).not.toHaveBeenCalled();
+  });
+
   it('acks a valid payment.completed event after processing without retry or DLQ publish', async () => {
     const event = createEvent(1);
     const message = createMessage(JSON.stringify(event));

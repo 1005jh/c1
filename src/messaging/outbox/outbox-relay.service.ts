@@ -13,6 +13,7 @@ import {
 import { PaymentCompletedPublisher } from '../events/payment-completed.publisher';
 import { OutboxEvent } from './entities/outbox-event.entity';
 import { OutboxEventStatus } from './entities/outbox-event-status.enum';
+import { OutboxMarkPublishedFaultInjector } from './outbox-mark-published-fault-injector';
 
 @Injectable()
 export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
@@ -27,6 +28,7 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
     private readonly dataSource: DataSource,
     private readonly paymentCompletedPublisher: PaymentCompletedPublisher,
     configService: ConfigService,
+    private readonly markPublishedFaultInjector: OutboxMarkPublishedFaultInjector,
   ) {
     this.enabled =
       configService.get<string>('OUTBOX_RELAY_ENABLED') !== 'false';
@@ -92,6 +94,7 @@ export class OutboxRelayService implements OnModuleInit, OnModuleDestroy {
       }
 
       await this.paymentCompletedPublisher.publish(event.payload);
+      this.markPublishedFaultInjector.throwIfEnabled();
       await this.markPublished(event);
     } catch (error) {
       await this.markPendingWithFailure(event, error);

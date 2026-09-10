@@ -7,6 +7,7 @@ import { PaymentCompletedPublisher } from './events/payment-completed.publisher'
 import { PaymentCompletedPublisherFaultInjector } from './events/payment-completed.publisher-fault-injector';
 import { OutboxEvent } from './outbox/entities/outbox-event.entity';
 import { OutboxRelayService } from './outbox/outbox-relay.service';
+import { OutboxMarkPublishedFaultInjector } from './outbox/outbox-mark-published-fault-injector';
 import { PaymentCompletedOutboxWriter } from './outbox/payment-completed-outbox.writer';
 import { ProcessedMessageService } from './processed-message.service';
 import { RabbitMqService } from './rabbitmq/rabbitmq.service';
@@ -19,6 +20,7 @@ import { RabbitMqService } from './rabbitmq/rabbitmq.service';
     PaymentCompletedPublisherFaultInjector,
     PaymentCompletedOutboxWriter,
     OutboxRelayService,
+    OutboxMarkPublishedFaultInjector,
     PaymentCompletedConsumerFaultInjector,
     PaymentCompletedConsumer,
     ProcessedMessageService,

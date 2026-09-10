@@ -222,7 +222,14 @@ const isExpectedObservation = (before, after) => {
   const dlqDelta = after.dlq.messages - before.dlq.messages;
 
   if (expectedOutcome === 'permanent' || expectedOutcome === 'dlq') {
-    return queuesAreEmpty(after) && dlqDelta >= 1;
+    // Queue depth can update before the sampled publish/ACK counters.
+    return (
+      queuesAreEmpty(after) &&
+      dlqDelta >= 1 &&
+      delta.main.ackDelta >= maxRetries + 1 &&
+      delta.retry.publishDelta >= maxRetries &&
+      delta.dlq.publishDelta >= 1
+    );
   }
 
   return (

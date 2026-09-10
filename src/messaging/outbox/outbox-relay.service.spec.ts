@@ -10,6 +10,10 @@ import { PaymentCompletedPublisher } from '../events/payment-completed.publisher
 import { OutboxEvent } from './entities/outbox-event.entity';
 import { OutboxEventStatus } from './entities/outbox-event-status.enum';
 import { OutboxRelayService } from './outbox-relay.service';
+import {
+  OUTBOX_MARK_PUBLISHED_FAILURE_MESSAGE,
+  OutboxMarkPublishedFaultInjector,
+} from './outbox-mark-published-fault-injector';
 
 type MockRepository<T = unknown> = Partial<
   Record<keyof Repository<T>, jest.Mock>
@@ -49,13 +53,18 @@ const createConfigService = ({
   enabled = 'true',
   intervalMs = 1000,
   batchSize = 20,
+  markFailCount = 0,
 }: {
   enabled?: string;
   intervalMs?: number;
   batchSize?: number;
+  markFailCount?: number;
 } = {}): ConfigService =>
   ({
     get: jest.fn((key: string) => {
+      if (key === 'OUTBOX_MARK_PUBLISHED_FAIL_COUNT') {
+        return markFailCount;
+      }
       if (key === 'OUTBOX_RELAY_ENABLED') {
         return enabled;
       }
@@ -86,6 +95,7 @@ describe('OutboxRelayService', () => {
       dataSource as unknown as DataSource,
       publisher as unknown as PaymentCompletedPublisher,
       configService,
+      new OutboxMarkPublishedFaultInjector(configService),
     );
   };
 
@@ -134,6 +144,85 @@ describe('OutboxRelayService', () => {
       lastError: null,
       publishedAt: expect.any(Date),
     });
+  });
+
+  it('does not update the Outbox before the publisher resolves', async () => {
+    const event = createOutboxEvent(1);
+    let confirm!: () => void;
+    publisher.publish.mockReturnValueOnce(
+      new Promise((resolve) => {
+        confirm = () => resolve(event.payload);
+      }),
+    );
+    repository.find?.mockResolvedValueOnce([event]);
+    const pending = service.runOnce();
+    await Promise.resolve();
+    expect(repository.update).not.toHaveBeenCalled();
+    confirm();
+    await pending;
+    expect(repository.update).toHaveBeenCalledWith(
+      event.id,
+      expect.objectContaining({ status: OutboxEventStatus.PUBLISHED }),
+    );
+  });
+
+  it('keeps a confirmed publication pending on injected mark failure and republishes on the next run', async () => {
+    createService(createConfigService({ markFailCount: 1 }));
+    const first = createOutboxEvent(1);
+    const second = createOutboxEvent(1, {
+      attempts: 1,
+      lastError: OUTBOX_MARK_PUBLISHED_FAILURE_MESSAGE,
+    });
+    repository.find
+      ?.mockResolvedValueOnce([first])
+      .mockResolvedValueOnce([second]);
+    await service.runOnce();
+    expect(publisher.publish).toHaveBeenCalledWith(first.payload);
+    expect(repository.update).toHaveBeenNthCalledWith(1, first.id, {
+      status: OutboxEventStatus.PENDING,
+      attempts: 1,
+      lastError: OUTBOX_MARK_PUBLISHED_FAILURE_MESSAGE,
+    });
+    await service.runOnce();
+    expect(publisher.publish).toHaveBeenNthCalledWith(2, first.payload);
+    expect(repository.update).toHaveBeenNthCalledWith(2, first.id, {
+      status: OutboxEventStatus.PUBLISHED,
+      attempts: 2,
+      lastError: null,
+      publishedAt: expect.any(Date) as Date,
+    });
+  });
+
+  it('does not consume a post-confirm fault on a publisher rejection', async () => {
+    createService(createConfigService({ markFailCount: 1 }));
+    repository.find?.mockResolvedValueOnce([
+      createOutboxEvent(1),
+      createOutboxEvent(2),
+      createOutboxEvent(3),
+    ]);
+    publisher.publish.mockRejectedValueOnce(new Error('NACK'));
+    await service.runOnce();
+    expect(repository.update).toHaveBeenNthCalledWith(
+      1,
+      1,
+      expect.objectContaining({
+        status: OutboxEventStatus.PENDING,
+        lastError: 'NACK',
+      }),
+    );
+    expect(repository.update).toHaveBeenNthCalledWith(
+      2,
+      2,
+      expect.objectContaining({
+        status: OutboxEventStatus.PENDING,
+        lastError: OUTBOX_MARK_PUBLISHED_FAILURE_MESSAGE,
+      }),
+    );
+    expect(repository.update).toHaveBeenNthCalledWith(
+      3,
+      3,
+      expect.objectContaining({ status: OutboxEventStatus.PUBLISHED }),
+    );
   });
 
   it('keeps failed publish events pending and records the error', async () => {

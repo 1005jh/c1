@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   Channel,
   ChannelModel,
+  ConfirmChannel,
   ConsumeMessage,
   Options,
   connect,
@@ -35,8 +36,9 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RabbitMqService.name);
   private readonly url: string;
   private readonly paymentCompletedRetryDelayMs: number;
+  private readonly publishConfirmTimeoutMs: number;
   private connection?: ChannelModel;
-  private publisherChannel?: Channel;
+  private publisherChannel?: ConfirmChannel;
   private consumerChannel?: Channel;
   private initializePromise?: Promise<void>;
 
@@ -44,6 +46,9 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
     this.url = configService.getOrThrow<string>('RABBITMQ_URL');
     this.paymentCompletedRetryDelayMs = Number(
       configService.get<number>('PAYMENT_COMPLETED_RETRY_DELAY_MS') ?? 1000,
+    );
+    this.publishConfirmTimeoutMs = Number(
+      configService.get<number>('RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS') ?? 3000,
     );
   }
 
@@ -71,11 +76,10 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
     routingKey: string,
     payload: unknown,
   ): Promise<void> {
-    const channel = await this.getPublisherChannel();
     const content = Buffer.from(JSON.stringify(payload));
     const eventLike = payload as { eventId?: unknown; eventType?: unknown };
 
-    const published = channel.publish(exchange, routingKey, content, {
+    await this.publishConfirmed(exchange, routingKey, content, {
       contentType: 'application/json',
       persistent: true,
       messageId:
@@ -85,10 +89,6 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
           ? eventLike.eventType
           : routingKey,
     });
-
-    if (!published) {
-      this.logger.warn('RabbitMQ publish buffer is full');
-    }
   }
 
   async publishMessage(
@@ -97,16 +97,63 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
     content: Buffer,
     options: Options.Publish = {},
   ): Promise<void> {
-    const channel = await this.getPublisherChannel();
-
-    const published = channel.publish(exchange, routingKey, content, {
+    await this.publishConfirmed(exchange, routingKey, content, {
       ...options,
       persistent: true,
     });
+  }
 
-    if (!published) {
-      this.logger.warn('RabbitMQ publish buffer is full');
-    }
+  private async publishConfirmed(
+    exchange: string,
+    routingKey: string,
+    content: Buffer,
+    options: Options.Publish,
+  ): Promise<void> {
+    const channel = await this.getPublisherChannel();
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: unknown): void => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        if (error != null) {
+          reject(
+            error instanceof Error ? error : new Error(this.messageFrom(error)),
+          );
+        } else {
+          this.logger.log(
+            `RabbitMQ publish confirmed: exchange=${exchange} routingKey=${routingKey} messageId=${options.messageId ?? 'unknown'}`,
+          );
+          resolve();
+        }
+      };
+      const timeout = setTimeout(() => {
+        finish(
+          new Error(
+            `RabbitMQ publisher confirm not observed within ${this.publishConfirmTimeoutMs}ms`,
+          ),
+        );
+      }, this.publishConfirmTimeoutMs);
+
+      try {
+        const accepted = channel.publish(
+          exchange,
+          routingKey,
+          content,
+          options,
+          finish,
+        );
+        if (!accepted) {
+          this.logger.warn('RabbitMQ publish buffer is full');
+        }
+      } catch (error) {
+        finish(error);
+      }
+    });
   }
 
   async consume(queue: string, handler: RabbitMqMessageHandler): Promise<void> {
@@ -125,7 +172,7 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private async getPublisherChannel(): Promise<Channel> {
+  private async getPublisherChannel(): Promise<ConfirmChannel> {
     await this.initialize();
 
     if (!this.publisherChannel) {
@@ -152,7 +199,12 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
 
   private async connectAndDeclareTopology(): Promise<void> {
     this.connection = await connect(this.url);
-    this.publisherChannel = await this.connection.createChannel();
+    this.publisherChannel = await this.connection.createConfirmChannel();
+    this.publisherChannel.on('error', (error: Error) => {
+      this.logger.error(
+        `RabbitMQ publisher channel error: ${this.messageFrom(error)}`,
+      );
+    });
     this.consumerChannel = await this.connection.createChannel();
 
     await this.assertTopology(this.publisherChannel);
